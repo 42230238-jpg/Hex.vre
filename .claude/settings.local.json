@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(npm start:*)",
+      "Bash(npx kill-port:*)",
+      "Bash(pkill -f \"node server.js\")"
+    ]
+  }
+}

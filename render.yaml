@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: hex-world-api
+    runtime: node
+    rootDir: server
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.1
+      - key: PORT
+        value: 3001
+      - key: JWT_SECRET
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+    disk:
+      name: hex-world-data
+      mountPath: /opt/render/project/src/server/data
+      sizeGB: 1
