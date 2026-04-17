@@ -87,7 +87,8 @@ const RESOURCE_INFO = {
 };
 
 const INITIAL_MARKET = { wheat: 3, brick: 5, ore: 6, wood: 4 };
-const INITIAL_LAND_PRICES = { wheat: 30, wood: 60, brick: 80, ore: 100 };
+const INITIAL_LAND_PRICES = { wheat: 30, brick: 60, ore: 80, wood: 100 };
+const LEGACY_LAND_PRICE_DEFAULTS = { wheat: 100, brick: 260, ore: 350, wood: 180 };
 
 const CHEST_COSTS = {
   brown: { wheat: 240, wood: 96 },
@@ -457,6 +458,24 @@ function createDefaultGameState() {
   };
 }
 
+function normalizeLandPrices(rawLandPrices) {
+  const merged = { ...INITIAL_LAND_PRICES, ...(rawLandPrices || {}) };
+  const matchesLegacyDefaults = RESOURCE_ORDER.every(
+    (resource) => Number(merged[resource]) === LEGACY_LAND_PRICE_DEFAULTS[resource]
+  );
+
+  if (matchesLegacyDefaults) {
+    return { ...INITIAL_LAND_PRICES };
+  }
+
+  return {
+    wheat: Number(merged.wheat ?? INITIAL_LAND_PRICES.wheat),
+    brick: Number(merged.brick ?? INITIAL_LAND_PRICES.brick),
+    ore: Number(merged.ore ?? INITIAL_LAND_PRICES.ore),
+    wood: Number(merged.wood ?? INITIAL_LAND_PRICES.wood),
+  };
+}
+
 function normalizeTile(tile) {
   const resource = RESOURCE_ORDER.includes(tile?.resource) ? tile.resource : randomResource();
   return {
@@ -485,7 +504,7 @@ function loadGameState() {
       };
       next.map = Array.isArray(parsed.map) && parsed.map.length ? parsed.map.map(normalizeTile) : createInitialHexMap();
       next.market = { ...INITIAL_MARKET, ...(parsed.market || {}) };
-      next.landPrices = { ...INITIAL_LAND_PRICES, ...(parsed.landPrices || {}) };
+      next.landPrices = normalizeLandPrices(parsed.landPrices);
       next.history = Array.isArray(parsed.history) && parsed.history.length ? parsed.history : [{ tick: 0, ...INITIAL_MARKET }];
       next.version = parsed.version || 1;
       return next;
@@ -1239,14 +1258,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         }
 
         gameState.landPrices[tile.resource] = nextLandPriceOnSell(tile.resource);
-
-        tile.ownerId = null;
-        tile.ownerName = null;
-        tile.depleted = true;
-        tile.stored = 0;
-        tile.storageLevel = 1;
-        tile.characters = [];
-        tile.timer = BASE_PRODUCTION_TIME[tile.resource];
+        gameState.map = gameState.map.filter((entry) => entry.id !== tile.id);
 
         persistAndBroadcast();
         return respondWithSnapshot(res, userId, {

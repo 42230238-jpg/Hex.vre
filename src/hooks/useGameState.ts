@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GameActionResult, GameSnapshot } from '../gameTypes';
 import { SERVER_CONFIG_ERROR, SERVER_URL } from '../config';
 
@@ -8,6 +8,7 @@ export function useGameState(token: string | null, refreshKey = 0) {
   const [gameState, setGameState] = useState<GameSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const pollInFlightRef = useRef(false);
 
   const loadGameState = useCallback(async (silent = false) => {
     if (!token) {
@@ -61,6 +62,27 @@ export function useGameState(token: string | null, refreshKey = 0) {
     const silent = refreshKey > 0 && gameState !== null;
     void loadGameState(silent);
   }, [loadGameState, refreshKey]);
+
+  useEffect(() => {
+    if (!token || SERVER_CONFIG_ERROR) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (pollInFlightRef.current) {
+        return;
+      }
+
+      pollInFlightRef.current = true;
+      void loadGameState(true).finally(() => {
+        pollInFlightRef.current = false;
+      });
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [loadGameState, token]);
 
   const runAction = useCallback(
     async (action: string, payload: ActionPayload = {}): Promise<GameActionResult & { ok: boolean }> => {
