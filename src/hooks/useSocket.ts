@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import type { TradeInvite, TradeOffer, TradeSessionView } from '../gameTypes';
-
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+import { SERVER_CONFIG_ERROR, SERVER_URL } from '../config';
 
 type ChatMessage = {
   id: string;
@@ -36,7 +35,12 @@ export function useSocket(token: string | null, user: AuthUser | null) {
   const [incomingTradeInvite, setIncomingTradeInvite] = useState<TradeInvite | null>(null);
 
   useEffect(() => {
-    if (!token) return;
+    if (!token || SERVER_CONFIG_ERROR) {
+      if (SERVER_CONFIG_ERROR) {
+        setError(SERVER_CONFIG_ERROR);
+      }
+      return;
+    }
 
     const socket = io(SERVER_URL);
     socketRef.current = socket;

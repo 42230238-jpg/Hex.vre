@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { GameActionResult, GameSnapshot } from '../gameTypes';
-
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+import { SERVER_CONFIG_ERROR, SERVER_URL } from '../config';
 
 type ActionPayload = Record<string, unknown>;
 
@@ -13,6 +12,12 @@ export function useGameState(token: string | null, refreshKey = 0) {
   const loadGameState = useCallback(async (silent = false) => {
     if (!token) {
       setGameState(null);
+      setLoading(false);
+      return null;
+    }
+
+    if (SERVER_CONFIG_ERROR) {
+      setError(SERVER_CONFIG_ERROR);
       setLoading(false);
       return null;
     }
@@ -61,6 +66,10 @@ export function useGameState(token: string | null, refreshKey = 0) {
     async (action: string, payload: ActionPayload = {}): Promise<GameActionResult & { ok: boolean }> => {
       if (!token) {
         return { ok: false, error: 'Not authenticated.' };
+      }
+
+      if (SERVER_CONFIG_ERROR) {
+        return { ok: false, error: SERVER_CONFIG_ERROR };
       }
 
       try {

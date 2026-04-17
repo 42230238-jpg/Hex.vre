@@ -5,6 +5,7 @@ import { Auth } from './components/Auth';
 import { useAuth } from './hooks/useAuth';
 import { useGameState } from './hooks/useGameState';
 import { useSocket } from './hooks/useSocket';
+import { SERVER_CONFIG_ERROR, SERVER_URL } from './config';
 import type {
   Character,
   ChestType,
@@ -606,11 +607,30 @@ export default function HexLandGame() {
     return <Auth onLogin={login} onRegister={register} error={authError} loading={authLoading} />;
   }
 
+  if (SERVER_CONFIG_ERROR) {
+    return (
+      <div className="min-h-screen bg-[#0b1020] flex items-center justify-center text-white p-5">
+        <div className="max-w-xl rounded-2xl border border-red-500/30 bg-slate-900 px-6 py-5">
+          <div className="text-lg font-bold text-red-300">Deployment setup incomplete</div>
+          <div className="mt-2 text-sm text-slate-200">{SERVER_CONFIG_ERROR}</div>
+          <div className="mt-3 text-xs text-slate-400">
+            Current site: {typeof window !== 'undefined' ? window.location.origin : 'unknown'}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (authLoading || gameLoading || !gameState) {
     return (
       <div className="min-h-screen bg-[#0b1020] flex items-center justify-center text-white">
-        <div className="rounded-2xl border border-slate-800 bg-slate-900 px-6 py-5">
-          {gameError || 'Loading shared world...'}
+        <div className="max-w-xl rounded-2xl border border-slate-800 bg-slate-900 px-6 py-5">
+          <div>{gameError || 'Loading shared world...'}</div>
+          {gameError && (
+            <div className="mt-3 text-xs text-slate-400">
+              Backend URL: {SERVER_URL || 'missing'}
+            </div>
+          )}
         </div>
       </div>
     );

@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+import { SERVER_CONFIG_ERROR, SERVER_URL } from '../config';
 
 type User = {
   id: string;
@@ -53,6 +52,12 @@ export function useAuth() {
     setLoading(true);
     setError(null);
 
+    if (SERVER_CONFIG_ERROR) {
+      setError(SERVER_CONFIG_ERROR);
+      setLoading(false);
+      return false;
+    }
+
     try {
       const response = await fetch(`${SERVER_URL}/api/auth/login`, {
         method: 'POST',
@@ -83,6 +88,12 @@ export function useAuth() {
   const register = useCallback(async (email: string, password: string, username: string) => {
     setLoading(true);
     setError(null);
+
+    if (SERVER_CONFIG_ERROR) {
+      setError(SERVER_CONFIG_ERROR);
+      setLoading(false);
+      return false;
+    }
 
     try {
       const response = await fetch(`${SERVER_URL}/api/auth/register`, {
