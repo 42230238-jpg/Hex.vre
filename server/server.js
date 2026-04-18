@@ -455,6 +455,7 @@ function createDefaultPlayerState() {
 }
 
 function createDefaultGameState() {
+  const now = new Date();
   return {
     version: 1,
     tick: 0,
@@ -462,7 +463,34 @@ function createDefaultGameState() {
     map: createInitialHexMap(),
     market: { ...INITIAL_MARKET },
     landPrices: { ...INITIAL_LAND_PRICES },
-    history: [{ tick: 0, ...INITIAL_MARKET }],
+    historyDayKey: getHistoryDayKey(now),
+    historyMinute: getHistoryMinuteOfDay(now),
+    history: [createHistoryPoint(0, INITIAL_MARKET)],
+  };
+}
+
+function getHistoryDayKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getHistoryMinuteOfDay(date = new Date()) {
+  return date.getHours() * 60 + date.getMinutes();
+}
+
+function formatHistoryLabel(minuteOfDay) {
+  const hours = String(Math.floor(minuteOfDay / 60)).padStart(2, '0');
+  const minutes = String(minuteOfDay % 60).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+function createHistoryPoint(minuteOfDay, market) {
+  return {
+    minute: minuteOfDay,
+    label: formatHistoryLabel(minuteOfDay),
+    ...market,
   };
 }
 
@@ -513,7 +541,22 @@ function loadGameState() {
       next.map = Array.isArray(parsed.map) && parsed.map.length ? parsed.map.map(normalizeTile) : createInitialHexMap();
       next.market = { ...INITIAL_MARKET, ...(parsed.market || {}) };
       next.landPrices = normalizeLandPrices(parsed.landPrices);
-      next.history = Array.isArray(parsed.history) && parsed.history.length ? parsed.history : [{ tick: 0, ...INITIAL_MARKET }];
+      next.historyDayKey = parsed.historyDayKey || getHistoryDayKey();
+      next.historyMinute = Number.isFinite(parsed.historyMinute) ? parsed.historyMinute : getHistoryMinuteOfDay();
+      next.history =
+        Array.isArray(parsed.history) && parsed.history.length
+          ? parsed.history.map((point) => ({
+              minute: Number.isFinite(point.minute) ? point.minute : Number(point.tick || 0),
+              label:
+                typeof point.label === 'string' && point.label
+                  ? point.label
+                  : formatHistoryLabel(Number.isFinite(point.minute) ? point.minute : Number(point.tick || 0)),
+              wheat: Number(point.wheat ?? INITIAL_MARKET.wheat),
+              brick: Number(point.brick ?? INITIAL_MARKET.brick),
+              ore: Number(point.ore ?? INITIAL_MARKET.ore),
+              wood: Number(point.wood ?? INITIAL_MARKET.wood),
+            }))
+          : [createHistoryPoint(getHistoryMinuteOfDay(), INITIAL_MARKET)];
       next.version = parsed.version || 1;
       return next;
     }
@@ -931,6 +974,46 @@ function aggregateInventory() {
   return totals;
 }
 
+function getTileCollectionBoost(tile) {
+  return tile.characters.reduce((sum, character) => sum + getEffectiveCharacterBoost(tile, character), 0) + getSynergyBonus(tile);
+}
+
+function collectFromTile(player, tile, amountToDrain) {
+  const drainAmount = Math.min(tile.stored, amountToDrain);
+  if (drainAmount <= 0) return 0;
+
+  tile.stored = Number((tile.stored - drainAmount).toFixed(3));
+  const boostedAmount = Number((drainAmount * (1 + getTileCollectionBoost(tile))).toFixed(3));
+  player.inventory[tile.resource] = Number((player.inventory[tile.resource] + boostedAmount).toFixed(3));
+  return boostedAmount;
+}
+
+function updateMarketHistory() {
+  const now = new Date();
+  const dayKey = getHistoryDayKey(now);
+  const minuteOfDay = getHistoryMinuteOfDay(now);
+
+  if (gameState.historyDayKey !== dayKey) {
+    gameState.historyDayKey = dayKey;
+    gameState.historyMinute = minuteOfDay;
+    gameState.history = [createHistoryPoint(minuteOfDay, gameState.market)];
+    return;
+  }
+
+  if (gameState.historyMinute === minuteOfDay) {
+    const lastEntry = gameState.history[gameState.history.length - 1];
+    if (lastEntry) {
+      gameState.history[gameState.history.length - 1] = createHistoryPoint(minuteOfDay, gameState.market);
+    } else {
+      gameState.history = [createHistoryPoint(minuteOfDay, gameState.market)];
+    }
+    return;
+  }
+
+  gameState.historyMinute = minuteOfDay;
+  gameState.history = [...gameState.history, createHistoryPoint(minuteOfDay, gameState.market)].slice(-1440);
+}
+
 function processWorldTick() {
   const ownedTilesByPlayer = new Map();
 
@@ -954,10 +1037,7 @@ function processWorldTick() {
     }
 
     for (const tile of ownedTiles) {
-      if (tile.stored >= 1) {
-        tile.stored = Number((tile.stored - 1).toFixed(3));
-        player.inventory[tile.resource] = Number((player.inventory[tile.resource] + 1).toFixed(3));
-      }
+      collectFromTile(player, tile, 1);
     }
 
     player.autoCollectTimeRemaining -= 1;
@@ -981,15 +1061,11 @@ function processWorldTick() {
       if (character.rarity !== 'exclusive') continue;
       if (character.specialAbility === 'double_production') speedMultiplier = Math.max(speedMultiplier, 2);
       if (character.specialAbility === 'triple_production') speedMultiplier = Math.max(speedMultiplier, 3);
-      if (character.specialAbility === 'auto_collect_single') autoCollectAmount += tile.stored * 0.5;
+      if (character.specialAbility === 'auto_collect_single') autoCollectAmount += currentTile.stored * 0.5;
     }
 
     if (autoCollectAmount > 0 && currentTile.stored > 0) {
-      const amount = Math.min(currentTile.stored, autoCollectAmount);
-      if (amount > 0.01) {
-        currentTile.stored = Number((currentTile.stored - amount).toFixed(3));
-        owner.inventory[currentTile.resource] = Number((owner.inventory[currentTile.resource] + amount).toFixed(3));
-      }
+      collectFromTile(owner, currentTile, autoCollectAmount);
     }
 
     const adjacentAutoCollect = prevMap.some((otherTile) => {
@@ -999,9 +1075,7 @@ function processWorldTick() {
     });
 
     if (adjacentAutoCollect && currentTile.stored > 0) {
-      const amount = currentTile.stored * 0.25;
-      currentTile.stored = Number((currentTile.stored - amount).toFixed(3));
-      owner.inventory[currentTile.resource] = Number((owner.inventory[currentTile.resource] + amount).toFixed(3));
+      collectFromTile(owner, currentTile, currentTile.stored * 0.25);
     }
 
     const timer = currentTile.timer - speedMultiplier;
@@ -1053,7 +1127,7 @@ function processWorldTick() {
   }
 
   gameState.market = nextMarket;
-  gameState.history = [...gameState.history, { tick: gameState.tick, ...nextMarket }].slice(-40);
+  updateMarketHistory();
 }
 
 function runManualRefresh(refreshedBy = 'system') {
@@ -1282,19 +1356,39 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         });
       }
 
+      case 'sellLand': {
+        const tile = gameState.map.find((entry) => entry.id === payload.tileId);
+        if (!tile) return res.status(404).json({ error: 'Land not found.' });
+        if (tile.ownerId !== userId) return res.status(403).json({ error: 'You do not own this land.' });
+
+        const payout = Number((gameState.landPrices[tile.resource] * 0.9).toFixed(3));
+        player.copper = Number((player.copper + payout).toFixed(6));
+        if (tile.characters.length > 0) {
+          player.charactersOwned = [...player.charactersOwned, ...tile.characters];
+        }
+
+        gameState.landPrices[tile.resource] = nextLandPriceOnSell(tile.resource);
+        tile.ownerId = null;
+        tile.ownerName = null;
+        tile.stored = 0;
+        tile.storageLevel = 1;
+        tile.characters = [];
+        tile.timer = BASE_PRODUCTION_TIME[tile.resource];
+        tile.depleted = false;
+
+        persistAndBroadcast();
+        return respondWithSnapshot(res, userId, {
+          message: `Sold ${tile.resource} land for ${payout.toFixed(3)} copper.`,
+        });
+      }
+
       case 'collectLand': {
         const tile = gameState.map.find((entry) => entry.id === payload.tileId);
         if (!tile) return res.status(404).json({ error: 'Land not found.' });
         if (tile.ownerId !== userId) return res.status(403).json({ error: 'You do not own this land.' });
         if (tile.stored <= 0) return res.status(400).json({ error: 'Nothing stored on this land.' });
 
-        const totalBoost =
-          tile.characters.reduce((sum, character) => sum + getEffectiveCharacterBoost(tile, character), 0) +
-          getSynergyBonus(tile);
-        const boostedAmount = Number((tile.stored * (1 + totalBoost)).toFixed(3));
-
-        player.inventory[tile.resource] = Number((player.inventory[tile.resource] + boostedAmount).toFixed(3));
-        tile.stored = 0;
+        const boostedAmount = collectFromTile(player, tile, tile.stored);
 
         persistAndBroadcast();
         return respondWithSnapshot(res, userId, {

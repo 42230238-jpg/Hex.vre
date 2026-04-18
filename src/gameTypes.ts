@@ -38,7 +38,7 @@ export type Tile = {
 export type MarketState = Record<ResourceType, number>;
 export type InventoryState = Record<ResourceType, number>;
 export type LandPriceState = Record<ResourceType, number>;
-export type HistoryPoint = { tick: number } & MarketState;
+export type HistoryPoint = { minute: number; label: string } & MarketState;
 export type ResourceCost = Partial<Record<ResourceType, number>>;
 
 export type PlayerGameState = {

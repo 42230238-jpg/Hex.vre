@@ -200,7 +200,7 @@ function formatTime(seconds: number) {
 const EMPTY_INVENTORY: InventoryState = { wheat: 0, brick: 0, ore: 0, wood: 0 };
 const EMPTY_MARKET: MarketState = { wheat: 3, brick: 5, ore: 6, wood: 4 };
 const EMPTY_LAND_PRICES: LandPriceState = { wheat: 30, wood: 60, brick: 80, ore: 100 };
-const EMPTY_HISTORY: HistoryPoint[] = [{ tick: 0, wheat: 3, brick: 5, ore: 6, wood: 4 }];
+const EMPTY_HISTORY: HistoryPoint[] = [{ minute: 0, label: '00:00', wheat: 3, brick: 5, ore: 6, wood: 4 }];
 
 export default function HexLandGame() {
   const { user, token, isAuthenticated, isAdmin, loading: authLoading, error: authError, login, register, logout } = useAuth();
@@ -312,6 +312,10 @@ export default function HexLandGame() {
       ? selectedTile.characters.reduce((sum, character) => sum + getEffectiveCharacterBoost(selectedTile, character), 0) +
         getSynergyBonus(selectedTile)
       : 0;
+  const selectedProjectedCollectAmount =
+    selectedTile && selectedTile.ownerId === user?.id
+      ? Number((selectedTile.stored * (1 + selectedCollectBoost)).toFixed(3))
+      : 0;
 
   async function runGameAction(action: string, payload: Record<string, unknown> = {}) {
     const result = await runAction(action, payload);
@@ -330,6 +334,11 @@ export default function HexLandGame() {
     if (result.ok) {
       setSelectedId(null);
     }
+  }
+
+  async function sellSelectedLand() {
+    if (!selectedTile || selectedTile.ownerId !== user?.id) return;
+    await runGameAction('sellLand', { tileId: selectedTile.id });
   }
 
   async function collectSelectedLand() {
@@ -588,7 +597,9 @@ export default function HexLandGame() {
           <>
             <text x={0} y={0} textAnchor="middle" fontSize="10" fill="#111" fontWeight={800}>{info.label}</text>
             <text x={0} y={14} textAnchor="middle" fontSize="9" fill="#111" fontWeight={700}>{effectiveTimer}s</text>
-            <text x={0} y={26} textAnchor="middle" fontSize="8" fill="#111" fontWeight={700}>{tile.stored.toFixed(1)}/{storageCapacity(tile.storageLevel)}</text>
+            <text x={0} y={26} textAnchor="middle" fontSize="8" fill="#111" fontWeight={700}>
+              {Number((tile.stored * (1 + totalBoost)).toFixed(1))}/{storageCapacity(tile.storageLevel)}
+            </text>
             {totalBoost > 0 && <text x={0} y={36} textAnchor="middle" fontSize="8" fill="#111" fontWeight={800}>+{Math.round(totalBoost * 100)}%</text>}
             {hasTriple && <text x={0} y={-20} textAnchor="middle" fontSize="12" fill="#f97316" fontWeight="bold">3x</text>}
             {!hasTriple && hasDouble && <text x={0} y={-20} textAnchor="middle" fontSize="12" fill="#f97316" fontWeight="bold">2x</text>}
@@ -702,6 +713,7 @@ export default function HexLandGame() {
                     <>
                       <div className="flex justify-between"><span>Next drop</span><b>{selectedTile.timer}s</b></div>
                       <div className="flex justify-between"><span>Stored</span><b>{selectedTile.stored.toFixed(3)}</b></div>
+                      <div className="flex justify-between"><span>Projected collect</span><b>{selectedProjectedCollectAmount.toFixed(3)}</b></div>
                       <div className="flex justify-between"><span>Storage</span><b>L{selectedTile.storageLevel} / {storageCapacity(selectedTile.storageLevel)}</b></div>
                     </>
                   )}
@@ -718,9 +730,12 @@ export default function HexLandGame() {
                   ) : selectedTile.ownerId === user?.id ? (
                     <>
                       <button className="w-full rounded-xl bg-emerald-700 px-4 py-2 disabled:opacity-50" onClick={collectSelectedLand} disabled={selectedTile.stored <= 0}>Collect Stored</button>
+                      <button className="w-full rounded-xl bg-yellow-500 px-4 py-2 font-semibold text-black hover:bg-yellow-400" onClick={sellSelectedLand}>
+                        Sell Land ({(landPrices[selectedTile.resource] * 0.9).toFixed(1)}c)
+                      </button>
                       <button className="w-full rounded-xl bg-orange-700 px-4 py-2 disabled:opacity-50" onClick={upgradeSelectedStorage} disabled={!selectedUpgradeCost || !canAfford(selectedUpgradeCost, inventory) || selectedTile.storageLevel >= STORAGE_LEVELS.length}>Upgrade Storage</button>
                       <button className="w-full rounded-xl bg-red-800 px-4 py-2 hover:bg-red-700" onClick={burnSelectedLand}>Burn Land (Get 1-10 Star Tokens)</button>
-                      <div className="text-xs text-slate-400">Burning returns assigned characters and grants Star Tokens.</div>
+                      <div className="text-xs text-slate-400">Selling returns 90% of the current land price. Burning returns assigned characters and grants Star Tokens.</div>
                       {selectedUpgradeCost && selectedTile.storageLevel < STORAGE_LEVELS.length && (
                         <div className="text-xs text-slate-300">Upgrade cost: {RESOURCE_ORDER.map((resource) => (selectedUpgradeCost[resource] ? `${resource}:${selectedUpgradeCost[resource]} ` : '')).join('')}</div>
                       )}
@@ -780,7 +795,7 @@ export default function HexLandGame() {
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={history}>
                     <CartesianGrid stroke="#22304d" strokeDasharray="3 3" />
-                    <XAxis dataKey="tick" stroke="#94a3b8" />
+                    <XAxis dataKey="label" stroke="#94a3b8" minTickGap={28} />
                     <YAxis stroke="#94a3b8" />
                     <Tooltip />
                     <Area type="monotone" dataKey="wheat" stroke="#facc15" fill="#facc15" fillOpacity={0.1} />
@@ -804,7 +819,7 @@ export default function HexLandGame() {
               ) : (
                 <div className="p-3 bg-green-900/30 border border-green-600 rounded text-center">
                   <div className="text-green-400 font-bold text-lg">Auto-Collect Running</div>
-                  <div className="text-xs text-green-300 mt-1">Collecting 1 material per tick from each owned tile</div>
+                  <div className="text-xs text-green-300 mt-1">Collecting from stored output every tick, with character bonuses applied.</div>
                   <div className="text-sm text-green-300 mt-2">Time remaining: {formatTime(autoCollectTimeRemaining)}</div>
                   <div className="w-full bg-green-900 h-2 rounded-full mt-2">
                     <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${Math.min(100, (autoCollectTimeRemaining / AUTO_COLLECT_DURATION) * 100)}%` }} />
