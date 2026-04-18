@@ -736,10 +736,13 @@ function serializeTradeForUser(trade, viewerUserId) {
   const otherUserId = trade.participantIds.find((participantId) => participantId !== viewerUserId);
   if (!otherUserId) return null;
 
+  const countdownRemainingMs = trade.countdownEndsAt ? Math.max(0, trade.countdownEndsAt - Date.now()) : null;
+
   return {
     id: trade.id,
     status: trade.countdownEndsAt ? 'countdown' : trade.status,
     countdownEndsAt: trade.countdownEndsAt,
+    countdownRemainingMs,
     self: getTradePartyView(trade, viewerUserId, viewerUserId),
     other: getTradePartyView(trade, viewerUserId, otherUserId),
     messages: trade.messages,

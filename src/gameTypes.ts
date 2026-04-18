@@ -99,6 +99,7 @@ export type TradeSessionView = {
   id: string;
   status: 'pending' | 'active' | 'countdown';
   countdownEndsAt: number | null;
+  countdownRemainingMs?: number | null;
   self: TradePartyView;
   other: TradePartyView;
   messages: TradeChatMessage[];

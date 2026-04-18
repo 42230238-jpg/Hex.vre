@@ -280,20 +280,21 @@ export default function HexLandGame() {
   }, [error, clearSocketError]);
 
   useEffect(() => {
-    if (!activeTrade?.countdownEndsAt) {
+    if (activeTrade?.status !== 'countdown') {
       setTradeCountdown(0);
       return;
     }
 
-    const updateCountdown = () => {
-      const remaining = Math.max(0, Math.ceil((activeTrade.countdownEndsAt! - Date.now()) / 1000));
-      setTradeCountdown(remaining);
-    };
+    let remainingMs = Math.max(0, activeTrade.countdownRemainingMs ?? 0);
+    setTradeCountdown(Math.max(0, Math.ceil(remainingMs / 1000)));
 
-    updateCountdown();
-    const intervalId = window.setInterval(updateCountdown, 250);
+    const intervalId = window.setInterval(() => {
+      remainingMs = Math.max(0, remainingMs - 250);
+      setTradeCountdown(Math.max(0, Math.ceil(remainingMs / 1000)));
+    }, 250);
+
     return () => window.clearInterval(intervalId);
-  }, [activeTrade?.countdownEndsAt]);
+  }, [activeTrade?.countdownRemainingMs, activeTrade?.status]);
 
   const worldBounds = useMemo(() => {
     if (!map.length) return { minX: -500, minY: -500, width: 1000, height: 1000 };
