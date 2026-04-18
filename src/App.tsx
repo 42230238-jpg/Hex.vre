@@ -730,14 +730,11 @@ export default function HexLandGame() {
                   ) : selectedTile.ownerId === user?.id ? (
                     <>
                       <button className="w-full rounded-xl bg-emerald-700 px-4 py-2 disabled:opacity-50" onClick={collectSelectedLand} disabled={selectedTile.stored <= 0}>Collect Stored</button>
-                      <button
-                        className="w-full rounded-xl border-4 border-black bg-fuchsia-400 px-4 py-3 text-lg font-black text-black shadow-[0_0_0_3px_#ffffff] hover:bg-fuchsia-300"
-                        onClick={sellSelectedLand}
-                      >
-                        SELL LAND DEBUG ({(landPrices[selectedTile.resource] * 0.9).toFixed(1)}c)
-                      </button>
                       <button className="w-full rounded-xl bg-orange-700 px-4 py-2 disabled:opacity-50" onClick={upgradeSelectedStorage} disabled={!selectedUpgradeCost || !canAfford(selectedUpgradeCost, inventory) || selectedTile.storageLevel >= STORAGE_LEVELS.length}>Upgrade Storage</button>
                       <button className="w-full rounded-xl bg-red-800 px-4 py-2 hover:bg-red-700" onClick={burnSelectedLand}>Burn Land (Get 1-10 Star Tokens)</button>
+                      <button className="w-full rounded-xl bg-yellow-500 px-4 py-2 font-bold text-black hover:bg-yellow-400" onClick={sellSelectedLand}>
+                        Sell Land
+                      </button>
                       <div className="text-xs text-slate-400">Selling returns 90% of the current land price. Burning returns assigned characters and grants Star Tokens.</div>
                       {selectedUpgradeCost && selectedTile.storageLevel < STORAGE_LEVELS.length && (
                         <div className="text-xs text-slate-300">Upgrade cost: {RESOURCE_ORDER.map((resource) => (selectedUpgradeCost[resource] ? `${resource}:${selectedUpgradeCost[resource]} ` : '')).join('')}</div>
