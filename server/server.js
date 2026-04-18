@@ -20,17 +20,24 @@ const JWT_SECRET = process.env.JWT_SECRET || 'hex-world-secret-key-change-in-pro
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '42230238@students.liu.edu.lb';
 const CLIENT_ORIGINS = (process.env.CORS_ORIGIN || process.env.CLIENT_URL || '*')
   .split(',')
-  .map((origin) => origin.trim())
+  .map((origin) => normalizeOrigin(origin))
   .filter(Boolean);
 
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+function normalizeOrigin(origin) {
+  const trimmed = String(origin || '').trim();
+  if (!trimmed || trimmed === '*') return trimmed;
+  return trimmed.replace(/\/+$/, '');
+}
+
 function isAllowedOrigin(origin) {
-  if (!origin) return true;
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (!normalizedOrigin) return true;
   if (CLIENT_ORIGINS.includes('*')) return true;
-  return CLIENT_ORIGINS.includes(origin);
+  return CLIENT_ORIGINS.includes(normalizedOrigin);
 }
 
 const corsOptions = {
@@ -43,6 +50,7 @@ const corsOptions = {
     callback(new Error(`Origin ${origin} is not allowed by CORS.`));
   },
   methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 };
 
 const app = express();
@@ -1067,57 +1075,62 @@ function respondWithSnapshot(res, userId, extra = {}) {
 }
 
 app.post('/api/auth/register', async (req, res) => {
-  const email = normalizeEmail(req.body.email);
-  const password = String(req.body.password || '');
-  const username = String(req.body.username || '').trim();
+  try {
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || '');
+    const username = String(req.body.username || '').trim();
 
-  if (!email || !password || !username) {
-    return res.status(400).json({ error: 'Email, password, and username are required' });
-  }
-
-  if (users[email]) {
-    return res.status(409).json({ error: 'Email already registered' });
-  }
-
-  for (const user of Object.values(users)) {
-    if (user.username === username.trim()) {
-      return res.status(409).json({ error: 'Username already taken' });
+    if (!email || !password || !username) {
+      return res.status(400).json({ error: 'Email, password, and username are required' });
     }
-  }
 
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const userId = uuidv4();
-  const isAdmin = isAdminEmail(email);
+    if (users[email]) {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
 
-  users[email] = {
-    id: userId,
-    email,
-    username,
-    password: hashedPassword,
-    isAdmin,
-    createdAt: new Date().toISOString(),
-  };
+    for (const user of Object.values(users)) {
+      if (user.username === username.trim()) {
+        return res.status(409).json({ error: 'Username already taken' });
+      }
+    }
 
-  saveUsers(users);
-  ensurePlayerState(userId);
-  persistPlayerState(userId);
-  saveGameState(gameState);
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const userId = uuidv4();
+    const isAdmin = isAdminEmail(email);
 
-  const token = jwt.sign(
-    { userId, email, username, isAdmin },
-    JWT_SECRET,
-    { expiresIn: '7d' }
-  );
-
-  return res.json({
-    token,
-    user: {
+    users[email] = {
       id: userId,
       email,
       username,
+      password: hashedPassword,
       isAdmin,
-    },
-  });
+      createdAt: new Date().toISOString(),
+    };
+
+    saveUsers(users);
+    ensurePlayerState(userId);
+    persistPlayerState(userId);
+    saveGameState(gameState);
+
+    const token = jwt.sign(
+      { userId, email, username, isAdmin },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    return res.json({
+      token,
+      user: {
+        id: userId,
+        email,
+        username,
+        isAdmin,
+      },
+    });
+  } catch (error) {
+    console.error('Registration failed:', error);
+    return res.status(500).json({ error: 'Server error while registering user.' });
+  }
 });
 
 app.post('/api/auth/login', async (req, res) => {
