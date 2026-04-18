@@ -199,7 +199,7 @@ function formatTime(seconds: number) {
 
 const EMPTY_INVENTORY: InventoryState = { wheat: 0, brick: 0, ore: 0, wood: 0 };
 const EMPTY_MARKET: MarketState = { wheat: 3, brick: 5, ore: 6, wood: 4 };
-const EMPTY_LAND_PRICES: LandPriceState = { wheat: 30, brick: 60, ore: 80, wood: 100 };
+const EMPTY_LAND_PRICES: LandPriceState = { wheat: 30, wood: 60, brick: 80, ore: 100 };
 const EMPTY_HISTORY: HistoryPoint[] = [{ tick: 0, wheat: 3, brick: 5, ore: 6, wood: 4 }];
 
 export default function HexLandGame() {

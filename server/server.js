@@ -95,7 +95,7 @@ const RESOURCE_INFO = {
 };
 
 const INITIAL_MARKET = { wheat: 3, brick: 5, ore: 6, wood: 4 };
-const INITIAL_LAND_PRICES = { wheat: 30, brick: 60, ore: 80, wood: 100 };
+const INITIAL_LAND_PRICES = { wheat: 30, wood: 60, brick: 80, ore: 100 };
 const LEGACY_LAND_PRICE_DEFAULTS = { wheat: 100, brick: 260, ore: 350, wood: 180 };
 
 const CHEST_COSTS = {
@@ -478,9 +478,9 @@ function normalizeLandPrices(rawLandPrices) {
 
   return {
     wheat: Number(merged.wheat ?? INITIAL_LAND_PRICES.wheat),
+    wood: Number(merged.wood ?? INITIAL_LAND_PRICES.wood),
     brick: Number(merged.brick ?? INITIAL_LAND_PRICES.brick),
     ore: Number(merged.ore ?? INITIAL_LAND_PRICES.ore),
-    wood: Number(merged.wood ?? INITIAL_LAND_PRICES.wood),
   };
 }
 
