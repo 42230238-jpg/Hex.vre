@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -18,10 +18,16 @@ dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'hex-world-secret-key-change-in-production';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '42230238@students.liu.edu.lb';
+const TURSO_DATABASE_URL = process.env.TURSO_DATABASE_URL;
+const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN;
 const CLIENT_ORIGINS = (process.env.CORS_ORIGIN || process.env.CLIENT_URL || '*')
   .split(',')
   .map((origin) => normalizeOrigin(origin))
   .filter(Boolean);
+
+if (!TURSO_DATABASE_URL || !TURSO_AUTH_TOKEN) {
+  throw new Error('Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN environment variables.');
+}
 
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
@@ -66,7 +72,6 @@ const DATA_DIR = process.env.DATA_DIR ? process.env.DATA_DIR.trim() : join(__dir
 const PLAYER_DATA_DIR = join(DATA_DIR, 'players');
 const USERS_FILE = join(DATA_DIR, 'users.json');
 const GAME_STATE_FILE = join(DATA_DIR, 'gameState.json');
-const DB_FILE = join(DATA_DIR, 'hexworld.db');
 
 const AUTO_COLLECT_DURATION = 1800;
 const AUTO_TICK_MS = 1000;
@@ -124,25 +129,19 @@ const CHEST_DROP_RATES = {
     legendary: 0.001,
   },
   gold: {
-    rare: 0.42,
-    very_rare: 0.33,
-    epic: 0.18,
-    mythic: 0.064,
-    legendary: 0.006,
+    very_rare: 0.5,
+    epic: 0.32,
+    mythic: 0.16,
+    legendary: 0.02,
   },
   diamond: {
-    rare: 0.18,
-    very_rare: 0.3,
-    epic: 0.3,
-    mythic: 0.195,
-    legendary: 0.025,
+    very_rare: 0.34,
+    epic: 0.38,
+    mythic: 0.24,
+    legendary: 0.04,
   },
   exclusive: {
-    very_rare: 0.2,
-    epic: 0.3,
-    mythic: 0.3,
-    legendary: 0.199,
-    exclusive: 0.001,
+    exclusive: 1,
   },
 };
 
@@ -188,9 +187,12 @@ if (!existsSync(PLAYER_DATA_DIR)) {
   mkdirSync(PLAYER_DATA_DIR, { recursive: true });
 }
 
-const db = new DatabaseSync(DB_FILE);
-db.exec(`
-  PRAGMA journal_mode = WAL;
+const db = createClient({
+  url: TURSO_DATABASE_URL,
+  authToken: TURSO_AUTH_TOKEN,
+});
+
+await db.executeMultiple(`
   CREATE TABLE IF NOT EXISTS users (
     email TEXT PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
@@ -209,8 +211,28 @@ db.exec(`
   );
 `);
 
-function loadUsers() {
-  const rows = db.prepare('SELECT email, id, username, password, is_admin, created_at FROM users').all();
+function mapRows(result) {
+  return result.rows.map((row) =>
+    Object.fromEntries(result.columns.map((column, index) => [column, row[index]]))
+  );
+}
+
+async function dbAll(sql, args = []) {
+  const result = await db.execute({ sql, args });
+  return mapRows(result);
+}
+
+async function dbGet(sql, args = []) {
+  const rows = await dbAll(sql, args);
+  return rows[0] || null;
+}
+
+async function dbRun(sql, args = []) {
+  return db.execute({ sql, args });
+}
+
+async function loadUsers() {
+  const rows = await dbAll('SELECT email, id, username, password, is_admin, created_at FROM users');
   return Object.fromEntries(
     rows.map((row) => [
       normalizeEmail(row.email),
@@ -226,30 +248,30 @@ function loadUsers() {
   );
 }
 
-function saveUsers(users) {
-  const upsertUser = db.prepare(`
-    INSERT INTO users (email, id, username, password, is_admin, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(email) DO UPDATE SET
-      id = excluded.id,
-      username = excluded.username,
-      password = excluded.password,
-      is_admin = excluded.is_admin,
-      created_at = excluded.created_at
-  `);
+async function saveUsers(users) {
+  const statements = [];
 
   for (const user of Object.values(users)) {
     const email = normalizeEmail(user.email);
     const isAdmin = Boolean(user.isAdmin) || isAdminEmail(email);
 
-    upsertUser.run(
-      email,
-      user.id,
-      user.username,
-      user.password,
-      isAdmin ? 1 : 0,
-      user.createdAt
-    );
+    statements.push({
+      sql: `
+        INSERT INTO users (email, id, username, password, is_admin, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+          id = excluded.id,
+          username = excluded.username,
+          password = excluded.password,
+          is_admin = excluded.is_admin,
+          created_at = excluded.created_at
+      `,
+      args: [email, user.id, user.username, user.password, isAdmin ? 1 : 0, user.createdAt],
+    });
+  }
+
+  if (statements.length > 0) {
+    await db.batch(statements, 'write');
   }
 }
 
@@ -418,10 +440,9 @@ function createCharacterInstance(type, forcedRarity = null) {
   let specialAbility;
   if (type === 'exclusive' || rarity === 'exclusive') {
     const roll = Math.random();
-    if (roll < 0.0005) specialAbility = 'daily_copper';
-    else if (roll < 0.005) specialAbility = 'auto_collect_adjacent';
-    else if (roll < 0.05) specialAbility = 'auto_collect_single';
-    else if (roll < 0.3) specialAbility = 'triple_production';
+    if (roll < 0.01) specialAbility = 'daily_copper';
+    else if (roll < 0.16) specialAbility = 'auto_collect_single';
+    else if (roll < 0.46) specialAbility = 'triple_production';
     else specialAbility = 'double_production';
   }
 
@@ -429,8 +450,7 @@ function createCharacterInstance(type, forcedRarity = null) {
   if (specialAbility === 'double_production') ability = 'Doubles production (2x speed)';
   if (specialAbility === 'triple_production') ability = 'Triples production (3x speed)';
   if (specialAbility === 'auto_collect_single') ability = 'Auto-collects from assigned land';
-  if (specialAbility === 'auto_collect_adjacent') ability = 'Auto-collects from 6 adjacent lands';
-  if (specialAbility === 'daily_copper') ability = 'Generates 1 copper per day';
+  if (specialAbility === 'daily_copper') ability = 'Generates 5 copper every 24 hours';
 
   return {
     ...base,
@@ -586,9 +606,9 @@ function normalizeTile(tile) {
   };
 }
 
-function loadGameState() {
+async function loadGameState() {
   try {
-    const row = db.prepare('SELECT value_json FROM app_state WHERE key = ?').get('world_state');
+    const row = await dbGet('SELECT value_json FROM app_state WHERE key = ?', ['world_state']);
     if (row) {
       const parsed = JSON.parse(row.value_json);
       const next = {
@@ -625,26 +645,26 @@ function loadGameState() {
   return createDefaultGameState();
 }
 
-function saveGameState(state) {
+async function saveGameState(state) {
   try {
-    db.prepare(`
+    await dbRun(`
       INSERT INTO app_state (key, value_json)
       VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
-    `).run('world_state', JSON.stringify(state));
+    `, ['world_state', JSON.stringify(state)]);
   } catch (error) {
     console.error('Error saving game state:', error);
   }
 }
 
-function migrateLegacyJsonToDatabase() {
-  const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
-  const hasWorldState = db.prepare('SELECT COUNT(*) AS count FROM app_state WHERE key = ?').get('world_state').count > 0;
-  const playerStateCount = db.prepare('SELECT COUNT(*) AS count FROM player_states').get().count;
+async function migrateLegacyJsonToDatabase() {
+  const userCount = Number((await dbGet('SELECT COUNT(*) AS count FROM users'))?.count || 0);
+  const hasWorldState = Number((await dbGet('SELECT COUNT(*) AS count FROM app_state WHERE key = ?', ['world_state']))?.count || 0) > 0;
+  const playerStateCount = Number((await dbGet('SELECT COUNT(*) AS count FROM player_states'))?.count || 0);
 
   if (!userCount && existsSync(USERS_FILE)) {
     try {
-      saveUsers(JSON.parse(readFileSync(USERS_FILE, 'utf8')));
+      await saveUsers(JSON.parse(readFileSync(USERS_FILE, 'utf8')));
     } catch (error) {
       console.error('Error migrating legacy users.json:', error);
     }
@@ -655,11 +675,11 @@ function migrateLegacyJsonToDatabase() {
       const legacyGameState = JSON.parse(readFileSync(GAME_STATE_FILE, 'utf8'));
       if (legacyGameState?.players && !playerStateCount) {
         for (const [userId, playerState] of Object.entries(legacyGameState.players)) {
-          savePlayerState(userId, normalizePlayerState(playerState));
+          await savePlayerState(userId, normalizePlayerState(playerState));
         }
         delete legacyGameState.players;
       }
-      saveGameState({
+      await saveGameState({
         ...createDefaultGameState(),
         ...legacyGameState,
       });
@@ -674,7 +694,7 @@ function migrateLegacyJsonToDatabase() {
         if (!file.endsWith('.json')) continue;
         const userId = file.replace(/\.json$/i, '');
         const playerState = JSON.parse(readFileSync(join(PLAYER_DATA_DIR, file), 'utf8'));
-        savePlayerState(userId, normalizePlayerState(playerState));
+        await savePlayerState(userId, normalizePlayerState(playerState));
       }
     } catch (error) {
       console.error('Error migrating legacy player json files:', error);
@@ -682,12 +702,12 @@ function migrateLegacyJsonToDatabase() {
   }
 }
 
-migrateLegacyJsonToDatabase();
-const users = loadUsers();
+await migrateLegacyJsonToDatabase();
+const users = await loadUsers();
 const players = new Map();
 const chatHistory = [];
 const MAX_CHAT_HISTORY = 100;
-let gameState = loadGameState();
+let gameState = await loadGameState();
 const playerStateCache = {};
 const tradeInvites = new Map();
 const activeTrades = new Map();
@@ -699,9 +719,9 @@ function getUserById(userId) {
   return Object.values(users).find((user) => user.id === userId) || null;
 }
 
-function loadPlayerState(userId) {
+async function loadPlayerState(userId) {
   try {
-    const row = db.prepare('SELECT state_json FROM player_states WHERE user_id = ?').get(userId);
+    const row = await dbGet('SELECT state_json FROM player_states WHERE user_id = ?', [userId]);
     if (row) {
       return JSON.parse(row.state_json);
     }
@@ -712,17 +732,30 @@ function loadPlayerState(userId) {
   return null;
 }
 
-function savePlayerState(userId, playerState) {
+async function savePlayerState(userId, playerState) {
   try {
-    db.prepare(`
+    await dbRun(`
       INSERT INTO player_states (user_id, state_json)
       VALUES (?, ?)
       ON CONFLICT(user_id) DO UPDATE SET state_json = excluded.state_json
-    `).run(userId, JSON.stringify(playerState));
+    `, [userId, JSON.stringify(playerState)]);
   } catch (error) {
     console.error(`Error saving player state for ${userId}:`, error);
   }
 }
+
+async function loadAllPlayerStates() {
+  const rows = await dbAll('SELECT user_id, state_json FROM player_states');
+  for (const row of rows) {
+    try {
+      playerStateCache[row.user_id] = normalizePlayerState(JSON.parse(row.state_json));
+    } catch (error) {
+      console.error(`Error parsing player state for ${row.user_id}:`, error);
+    }
+  }
+}
+
+await loadAllPlayerStates();
 
 function normalizePlayerState(rawPlayer) {
   const player = rawPlayer ? { ...rawPlayer } : createDefaultPlayerState();
@@ -738,27 +771,40 @@ function normalizePlayerState(rawPlayer) {
 
 function ensurePlayerState(userId) {
   if (!playerStateCache[userId]) {
-    const loadedPlayer = loadPlayerState(userId);
-    playerStateCache[userId] = normalizePlayerState(loadedPlayer);
+    playerStateCache[userId] = createDefaultPlayerState();
   }
 
   return playerStateCache[userId];
 }
 
-function persistPlayerState(userId) {
+async function persistPlayerState(userId) {
   if (!playerStateCache[userId]) return;
-  savePlayerState(userId, playerStateCache[userId]);
+  await savePlayerState(userId, playerStateCache[userId]);
 }
 
-function persistAllPlayerStates() {
-  for (const userId of Object.keys(playerStateCache)) {
-    persistPlayerState(userId);
+async function persistAllPlayerStates() {
+  const userIds = Object.keys(playerStateCache);
+  if (!userIds.length) return;
+
+  const statements = userIds.map((userId) => ({
+    sql: `
+      INSERT INTO player_states (user_id, state_json)
+      VALUES (?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET state_json = excluded.state_json
+    `,
+    args: [userId, JSON.stringify(playerStateCache[userId])],
+  }));
+
+  try {
+    await db.batch(statements, 'write');
+  } catch (error) {
+    console.error('Error saving all player states:', error);
   }
 }
 
-function resetAllPlayerStates() {
+async function resetAllPlayerStates() {
   try {
-    db.prepare('DELETE FROM player_states').run();
+    await dbRun('DELETE FROM player_states');
   } catch (error) {
     console.error('Error clearing player states:', error);
   }
@@ -967,7 +1013,9 @@ function finalizeTrade(tradeId) {
   transferOffer(leftPlayer, rightPlayer, leftOffer);
   transferOffer(rightPlayer, leftPlayer, rightOffer);
 
-  persistAndBroadcast();
+  void persistAndBroadcast().catch((error) => {
+    console.error('Failed to persist completed trade:', error);
+  });
   closeTrade(tradeId, 'Trade completed successfully.');
 }
 
@@ -992,11 +1040,11 @@ function broadcastGameStateUpdate() {
   });
 }
 
-function persistAndBroadcast() {
+async function persistAndBroadcast() {
   gameState.version += 1;
   gameState.lastUpdate = Date.now();
-  saveGameState(gameState);
-  persistAllPlayerStates();
+  await saveGameState(gameState);
+  await persistAllPlayerStates();
   broadcastGameStateUpdate();
 }
 
@@ -1165,7 +1213,7 @@ function processWorldTick(tickTime = Date.now()) {
       const player = ensurePlayerState(user.id);
       const count = player.charactersOwned.filter((character) => character.specialAbility === 'daily_copper').length;
       if (count > 0) {
-        player.copper += count;
+        player.copper += count * 5;
       }
     }
   }
@@ -1189,25 +1237,25 @@ function processWorldTick(tickTime = Date.now()) {
   updateMarketHistory(new Date(tickTime));
 }
 
-function runManualRefresh(refreshedBy = 'system') {
+async function runManualRefresh(refreshedBy = 'system') {
   const tickTime = Date.now();
   gameState.tick += 1;
   processWorldTick(tickTime);
   gameState.lastTickAt = tickTime;
-  persistAndBroadcast();
+  await persistAndBroadcast();
   io.emit('gameTick', { tick: gameState.tick, refreshedBy });
 }
 
-function runAutoTick() {
+async function runAutoTick() {
   const tickTime = Date.now();
   gameState.tick += 1;
   processWorldTick(tickTime);
   gameState.lastTickAt = tickTime;
-  persistAndBroadcast();
+  await persistAndBroadcast();
   io.emit('gameTick', { tick: gameState.tick, refreshedBy: 'auto' });
 }
 
-function recoverWorldStateOnStartup() {
+async function recoverWorldStateOnStartup() {
   const now = Date.now();
   const lastTickAt = Number.isFinite(gameState.lastTickAt) ? gameState.lastTickAt : now;
   const elapsedMs = Math.max(0, now - lastTickAt);
@@ -1215,7 +1263,7 @@ function recoverWorldStateOnStartup() {
 
   if (missedTicks <= 0) {
     gameState.lastTickAt = now;
-    saveGameState(gameState);
+    await saveGameState(gameState);
     return;
   }
 
@@ -1228,7 +1276,7 @@ function recoverWorldStateOnStartup() {
   }
 
   gameState.lastTickAt = lastTickAt + missedTicks * AUTO_TICK_MS;
-  persistAndBroadcast();
+  await persistAndBroadcast();
   console.log(`World recovery complete. Tick is now ${gameState.tick}.`);
 }
 
@@ -1272,10 +1320,10 @@ app.post('/api/auth/register', async (req, res) => {
       createdAt: new Date().toISOString(),
     };
 
-    saveUsers(users);
+    await saveUsers(users);
     ensurePlayerState(userId);
-    persistPlayerState(userId);
-    saveGameState(gameState);
+    await persistPlayerState(userId);
+    await saveGameState(gameState);
 
     const token = jwt.sign(
       { userId, email, username, isAdmin },
@@ -1317,8 +1365,8 @@ app.post('/api/auth/login', async (req, res) => {
   }
 
   ensurePlayerState(user.id);
-  persistPlayerState(user.id);
-  saveGameState(gameState);
+  await persistPlayerState(user.id);
+  await saveGameState(gameState);
 
   const token = jwt.sign(
     { userId: user.id, email, username: user.username, isAdmin: isAdminEmail(email) },
@@ -1381,12 +1429,12 @@ app.get('/api/game/bootstrap', authenticateToken, (req, res) => {
   });
 });
 
-app.post('/api/game/refresh', authenticateToken, (req, res) => {
+app.post('/api/game/refresh', authenticateToken, async (req, res) => {
   if (!req.user.isAdmin) {
     return res.status(403).json({ error: 'Only admin can refresh' });
   }
 
-  runManualRefresh(req.user.username);
+  await runManualRefresh(req.user.username);
   return respondWithSnapshot(res, req.user.userId, { message: 'World refreshed.' });
 });
 
@@ -1415,7 +1463,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.stored = 0;
         tile.characters = [];
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `Bought ${tile.resource} land for ${price} copper.`,
         });
@@ -1438,7 +1486,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         gameState.landPrices[tile.resource] = nextLandPriceOnSell(tile.resource);
         gameState.map = gameState.map.filter((entry) => entry.id !== tile.id);
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `Burned land for ${tokens} Star Tokens!`,
         });
@@ -1464,7 +1512,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.timer = BASE_PRODUCTION_TIME[tile.resource];
         tile.depleted = false;
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `Sold ${tile.resource} land for ${payout.toFixed(3)} copper.`,
         });
@@ -1478,7 +1526,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
 
         const boostedAmount = collectFromTile(player, tile, tile.stored);
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `Collected ${boostedAmount.toFixed(3)} ${tile.resource}.`,
         });
@@ -1502,7 +1550,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.inventory = payCost(cost, player.inventory);
         tile.storageLevel = nextLevel;
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `Upgraded storage to level ${nextLevel}.`,
         });
@@ -1525,7 +1573,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.inventory[resource] = Number((player.inventory[resource] - amount).toFixed(3));
         player.copper = Number((player.copper + amount * gameState.market[resource]).toFixed(6));
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `Sold ${amount.toFixed(3)} ${resource}.`,
         });
@@ -1556,7 +1604,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
           message = `${message} Found ${STAR_TOKEN_CHEST_BONUS_AMOUNT} Blue Star Tokens!`;
         }
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message,
           wonCharacter,
@@ -1576,7 +1624,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.charactersOwned = [...player.charactersOwned, wonCharacter];
         player.nickel += RARITY_META[wonCharacter.rarity].stars;
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: 'Opened Exclusive Box with Star Tokens!',
           wonCharacter,
@@ -1612,7 +1660,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         const fusedCharacter = createCharacterInstance('fusion', resultRarity);
         player.charactersOwned = [...player.charactersOwned, fusedCharacter];
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `Fused 3 ${RARITY_META[sourceRarity].label} characters into 1 ${RARITY_META[resultRarity].label} character.`,
           fusedCharacter,
@@ -1635,7 +1683,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         const [character] = player.charactersOwned.splice(charIndex, 1);
         tile.characters = [...tile.characters, character];
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `${character.name} assigned to ${tile.resource} land.`,
         });
@@ -1653,7 +1701,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.characters = tile.characters.filter((_, currentIndex) => currentIndex !== index);
         player.charactersOwned = [...player.charactersOwned, removed];
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: `${removed.name} returned to inventory.`,
         });
@@ -1668,7 +1716,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.autoCollectActive = true;
         player.autoCollectTimeRemaining += AUTO_COLLECT_DURATION;
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: 'Auto-collect extended by 30 minutes.',
         });
@@ -1696,7 +1744,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.r = targetR;
         tile.id = keyOf(targetQ, targetR);
 
-        persistAndBroadcast();
+        await persistAndBroadcast();
         return respondWithSnapshot(res, userId, {
           message: 'Land moved.',
         });
@@ -1723,8 +1771,8 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         }
 
         gameState = createDefaultGameState();
-        resetAllPlayerStates();
-        persistAndBroadcast();
+        await resetAllPlayerStates();
+        await persistAndBroadcast();
         io.emit('gameTick', { tick: gameState.tick, refreshedBy: 'admin-reset' });
 
         return respondWithSnapshot(res, userId, {
@@ -1809,13 +1857,13 @@ io.on('connection', (socket) => {
     io.emit('newMessage', messageData);
   });
 
-  socket.on('manualRefresh', () => {
+  socket.on('manualRefresh', async () => {
     if (!socket.isAdmin) {
       socket.emit('error', { message: 'Only admin can refresh' });
       return;
     }
 
-    runManualRefresh(socket.username);
+    await runManualRefresh(socket.username);
     console.log(`Game refreshed by ${socket.username}. Tick: ${gameState.tick}`);
   });
 
@@ -2035,13 +2083,13 @@ const PORT = process.env.PORT || 3001;
 let autoTickInterval = null;
 let shuttingDown = false;
 
-function flushStateToDisk() {
-  saveUsers(users);
-  saveGameState(gameState);
-  persistAllPlayerStates();
+async function flushStateToDisk() {
+  await saveUsers(users);
+  await saveGameState(gameState);
+  await persistAllPlayerStates();
 }
 
-function shutdownServer(signal) {
+async function shutdownServer(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
 
@@ -2051,7 +2099,7 @@ function shutdownServer(signal) {
   }
 
   try {
-    flushStateToDisk();
+    await flushStateToDisk();
   } catch (error) {
     console.error(`Failed to flush state during ${signal}:`, error);
   }
@@ -2067,23 +2115,25 @@ function shutdownServer(signal) {
   }, 10000).unref();
 }
 
-recoverWorldStateOnStartup();
+await recoverWorldStateOnStartup();
 
 server.listen(PORT, () => {
   console.log(`Hex World Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin email: ${ADMIN_EMAIL}`);
   console.log(`Data directory: ${DATA_DIR}`);
-  console.log(`SQLite database: ${DB_FILE}`);
+  console.log(`Turso database: ${TURSO_DATABASE_URL}`);
 });
 
 autoTickInterval = setInterval(() => {
-  try {
-    runAutoTick();
-  } catch (error) {
+  void runAutoTick().catch((error) => {
     console.error('Automatic world tick failed:', error);
-  }
+  });
 }, AUTO_TICK_MS);
 
-process.on('SIGINT', () => shutdownServer('SIGINT'));
-process.on('SIGTERM', () => shutdownServer('SIGTERM'));
+process.on('SIGINT', () => {
+  void shutdownServer('SIGINT');
+});
+process.on('SIGTERM', () => {
+  void shutdownServer('SIGTERM');
+});
