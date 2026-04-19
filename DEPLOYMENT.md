@@ -4,14 +4,15 @@ Hex World is now set up for:
 
 - Shared online multiplayer
 - Email/password accounts
-- SQLite persistence for users, world state, and player inventories
+- Google OAuth sign-in
+- Turso persistence for users, world state, and player inventories
 - Separate frontend and backend deployment
 
 ## Recommended Setup
 
 - Frontend: Vercel
 - Backend: Render
-- Database file: SQLite stored on a persistent Render disk
+- Database: Turso (libSQL)
 
 This is the simplest path to get a public link people can open from anywhere.
 
@@ -29,15 +30,19 @@ Create a new Render Blueprint or Web Service from your GitHub repo, then set the
 JWT_SECRET=replace-with-a-long-random-secret
 ADMIN_EMAIL=42230238@students.liu.edu.lb
 CORS_ORIGIN=https://your-frontend-domain.vercel.app
+SERVER_PUBLIC_URL=https://your-backend.onrender.com
+TURSO_DATABASE_URL=libsql://your-db-name-org.turso.io
+TURSO_AUTH_TOKEN=your-turso-auth-token
+GOOGLE_CLIENT_ID=your-google-web-client-id
+GOOGLE_CLIENT_SECRET=your-google-web-client-secret
 PORT=3001
 ```
 
 Important notes:
 
-- The backend uses SQLite at the directory in `DATA_DIR`.
-- For local development, `DATA_DIR` defaults to `server/data`.
-- On Render, `DATA_DIR` should point at a mounted persistent disk so restarts and redeploys keep the same SQLite database.
-- The included `render.yaml` sets `DATA_DIR=/var/data/hex-world` and mounts the persistent disk at `/var/data/hex-world`.
+- The backend persists to Turso, so no local disk mount is required for production data.
+- `SERVER_PUBLIC_URL` must match the public Render URL exactly (no trailing slash).
+- `CORS_ORIGIN` can be a comma-separated list if you have multiple frontend domains.
 
 After deploy, your backend URL will look something like:
 
@@ -110,6 +115,11 @@ Backend example:
 JWT_SECRET=hex-world-secret-key-2024
 ADMIN_EMAIL=42230238@students.liu.edu.lb
 CORS_ORIGIN=http://localhost:5173
+SERVER_PUBLIC_URL=http://localhost:3002
+TURSO_DATABASE_URL=libsql://your-db-name-org.turso.io
+TURSO_AUTH_TOKEN=your-turso-auth-token
+GOOGLE_CLIENT_ID=your-google-web-client-id
+GOOGLE_CLIENT_SECRET=your-google-web-client-secret
 PORT=3002
 ```
 
@@ -135,14 +145,20 @@ If the site opens but multiplayer does not connect:
 
 If data disappears after deploy:
 
-- Confirm the Render persistent disk is attached
-- Confirm the disk mount path is `/var/data/hex-world`
-- Confirm the `DATA_DIR` environment variable is also `/var/data/hex-world`
+- Confirm `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` are set correctly
+- Confirm your Render service can reach Turso
+
+If Google sign-in fails:
+
+- Confirm `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` match the same Google OAuth Web client
+- Confirm Authorized redirect URI includes `https://your-backend.onrender.com/api/auth/google/callback`
+- Confirm Authorized redirect URI includes your local callback too for dev: `http://localhost:3002/api/auth/google/callback`
+- Confirm `SERVER_PUBLIC_URL` exactly matches the backend host used in those redirect URIs
 
 If the server restarts after downtime:
 
-- The backend now reloads the latest persisted SQLite world state on boot
-- The server replays missed world ticks based on the persisted `lastTickAt` timestamp
+- The backend now reloads the latest persisted Turso world state on boot
+- Startup recovery now replays up to 300 missed ticks and skips older stale ticks to prevent long freeze-on-boot behavior
 - Land timers, auto-collect countdowns, market updates, world expansion, and player progress continue from persisted state instead of starting over
 
 ## 9. What This Does Not Do Automatically

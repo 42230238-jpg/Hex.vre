@@ -10,6 +10,7 @@ import { createClient } from '@libsql/client';
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { randomBytes } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -20,6 +21,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'hex-world-secret-key-change-in-pro
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '42230238@students.liu.edu.lb';
 const TURSO_DATABASE_URL = process.env.TURSO_DATABASE_URL;
 const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN;
+const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || '').trim();
+const GOOGLE_CLIENT_SECRET = String(process.env.GOOGLE_CLIENT_SECRET || '').trim();
+const SERVER_PUBLIC_URL = normalizeOrigin(process.env.SERVER_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '');
 const CLIENT_ORIGINS = (process.env.CORS_ORIGIN || process.env.CLIENT_URL || '*')
   .split(',')
   .map((origin) => normalizeOrigin(origin))
@@ -44,6 +48,19 @@ function isAllowedOrigin(origin) {
   if (!normalizedOrigin) return true;
   if (CLIENT_ORIGINS.includes('*')) return true;
   return CLIENT_ORIGINS.includes(normalizedOrigin);
+}
+
+function canUseGoogleOAuth() {
+  return Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && SERVER_PUBLIC_URL);
+}
+
+function getAllowedClientOrigins() {
+  if (CLIENT_ORIGINS.includes('*')) return [];
+  return [...new Set(CLIENT_ORIGINS.filter(Boolean))];
+}
+
+function buildGoogleCallbackUrl() {
+  return `${SERVER_PUBLIC_URL}/api/auth/google/callback`;
 }
 
 const corsOptions = {
@@ -199,7 +216,9 @@ await db.executeMultiple(`
     username TEXT NOT NULL UNIQUE,
     password TEXT NOT NULL,
     is_admin INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    auth_provider TEXT NOT NULL DEFAULT 'email',
+    google_sub TEXT UNIQUE
   );
   CREATE TABLE IF NOT EXISTS player_states (
     user_id TEXT PRIMARY KEY,
@@ -210,6 +229,26 @@ await db.executeMultiple(`
     value_json TEXT NOT NULL
   );
 `);
+
+async function ensureUserAuthColumns() {
+  const statements = [
+    `ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'email'`,
+    `ALTER TABLE users ADD COLUMN google_sub TEXT UNIQUE`,
+  ];
+
+  for (const sql of statements) {
+    try {
+      await dbRun(sql);
+    } catch (error) {
+      const message = String(error?.message || '');
+      if (!message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
+  }
+}
+
+await ensureUserAuthColumns();
 
 function mapRows(result) {
   return result.rows.map((row) =>
@@ -232,7 +271,7 @@ async function dbRun(sql, args = []) {
 }
 
 async function loadUsers() {
-  const rows = await dbAll('SELECT email, id, username, password, is_admin, created_at FROM users');
+  const rows = await dbAll('SELECT email, id, username, password, is_admin, created_at, auth_provider, google_sub FROM users');
   return Object.fromEntries(
     rows.map((row) => [
       normalizeEmail(row.email),
@@ -243,6 +282,8 @@ async function loadUsers() {
         password: row.password,
         isAdmin: Boolean(row.is_admin) || isAdminEmail(row.email),
         createdAt: row.created_at,
+        authProvider: row.auth_provider || 'email',
+        googleSub: row.google_sub || null,
       },
     ])
   );
@@ -257,16 +298,27 @@ async function saveUsers(users) {
 
     statements.push({
       sql: `
-        INSERT INTO users (email, id, username, password, is_admin, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO users (email, id, username, password, is_admin, created_at, auth_provider, google_sub)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
           id = excluded.id,
           username = excluded.username,
           password = excluded.password,
           is_admin = excluded.is_admin,
-          created_at = excluded.created_at
+          created_at = excluded.created_at,
+          auth_provider = excluded.auth_provider,
+          google_sub = excluded.google_sub
       `,
-      args: [email, user.id, user.username, user.password, isAdmin ? 1 : 0, user.createdAt],
+      args: [
+        email,
+        user.id,
+        user.username,
+        user.password,
+        isAdmin ? 1 : 0,
+        user.createdAt,
+        user.authProvider || 'email',
+        user.googleSub || null,
+      ],
     });
   }
 
@@ -646,15 +698,11 @@ async function loadGameState() {
 }
 
 async function saveGameState(state) {
-  try {
-    await dbRun(`
-      INSERT INTO app_state (key, value_json)
-      VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
-    `, ['world_state', JSON.stringify(state)]);
-  } catch (error) {
-    console.error('Error saving game state:', error);
-  }
+  await dbRun(`
+    INSERT INTO app_state (key, value_json)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
+  `, ['world_state', JSON.stringify(state)]);
 }
 
 async function migrateLegacyJsonToDatabase() {
@@ -712,8 +760,10 @@ const playerStateCache = {};
 const tradeInvites = new Map();
 const activeTrades = new Map();
 const mutedTradeInvites = new Map();
+const googleOAuthStates = new Map();
 const TRADE_INVITE_MUTE_MS = 10 * 60 * 1000;
 const TRADE_COUNTDOWN_MS = 5000;
+const GOOGLE_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
 function getUserById(userId) {
   return Object.values(users).find((user) => user.id === userId) || null;
@@ -733,15 +783,11 @@ async function loadPlayerState(userId) {
 }
 
 async function savePlayerState(userId, playerState) {
-  try {
-    await dbRun(`
-      INSERT INTO player_states (user_id, state_json)
-      VALUES (?, ?)
-      ON CONFLICT(user_id) DO UPDATE SET state_json = excluded.state_json
-    `, [userId, JSON.stringify(playerState)]);
-  } catch (error) {
-    console.error(`Error saving player state for ${userId}:`, error);
-  }
+  await dbRun(`
+    INSERT INTO player_states (user_id, state_json)
+    VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET state_json = excluded.state_json
+  `, [userId, JSON.stringify(playerState)]);
 }
 
 async function loadAllPlayerStates() {
@@ -795,11 +841,7 @@ async function persistAllPlayerStates() {
     args: [userId, JSON.stringify(playerStateCache[userId])],
   }));
 
-  try {
-    await db.batch(statements, 'write');
-  } catch (error) {
-    console.error('Error saving all player states:', error);
-  }
+  await db.batch(statements, 'write');
 }
 
 async function resetAllPlayerStates() {
@@ -1013,9 +1055,7 @@ function finalizeTrade(tradeId) {
   transferOffer(leftPlayer, rightPlayer, leftOffer);
   transferOffer(rightPlayer, leftPlayer, rightOffer);
 
-  void persistAndBroadcast().catch((error) => {
-    console.error('Failed to persist completed trade:', error);
-  });
+  publishStateChange();
   closeTrade(tradeId, 'Trade completed successfully.');
 }
 
@@ -1040,12 +1080,42 @@ function broadcastGameStateUpdate() {
   });
 }
 
-async function persistAndBroadcast() {
-  gameState.version += 1;
-  gameState.lastUpdate = Date.now();
+async function persistCurrentState() {
   await saveGameState(gameState);
   await persistAllPlayerStates();
+}
+
+let persistenceInFlight = null;
+let persistenceQueued = false;
+
+function queueStatePersistence() {
+  persistenceQueued = true;
+
+  if (persistenceInFlight) {
+    return persistenceInFlight;
+  }
+
+  persistenceInFlight = (async () => {
+    while (persistenceQueued) {
+      persistenceQueued = false;
+      try {
+        await persistCurrentState();
+      } catch (error) {
+        console.error('State persistence failed:', error);
+      }
+    }
+  })().finally(() => {
+    persistenceInFlight = null;
+  });
+
+  return persistenceInFlight;
+}
+
+function publishStateChange() {
+  gameState.version += 1;
+  gameState.lastUpdate = Date.now();
   broadcastGameStateUpdate();
+  void queueStatePersistence();
 }
 
 function authenticateToken(req, res, next) {
@@ -1242,17 +1312,28 @@ async function runManualRefresh(refreshedBy = 'system') {
   gameState.tick += 1;
   processWorldTick(tickTime);
   gameState.lastTickAt = tickTime;
-  await persistAndBroadcast();
+  publishStateChange();
   io.emit('gameTick', { tick: gameState.tick, refreshedBy });
 }
 
+let autoTickRunning = false;
+
 async function runAutoTick() {
+  if (autoTickRunning) {
+    return;
+  }
+
+  autoTickRunning = true;
+  try {
   const tickTime = Date.now();
   gameState.tick += 1;
   processWorldTick(tickTime);
   gameState.lastTickAt = tickTime;
-  await persistAndBroadcast();
+  publishStateChange();
   io.emit('gameTick', { tick: gameState.tick, refreshedBy: 'auto' });
+  } finally {
+    autoTickRunning = false;
+  }
 }
 
 async function recoverWorldStateOnStartup() {
@@ -1260,23 +1341,34 @@ async function recoverWorldStateOnStartup() {
   const lastTickAt = Number.isFinite(gameState.lastTickAt) ? gameState.lastTickAt : now;
   const elapsedMs = Math.max(0, now - lastTickAt);
   const missedTicks = Math.floor(elapsedMs / AUTO_TICK_MS);
+  const maxRecoveryTicks = 300;
+  const ticksToReplay = Math.min(missedTicks, maxRecoveryTicks);
 
-  if (missedTicks <= 0) {
+  if (ticksToReplay <= 0) {
     gameState.lastTickAt = now;
     await saveGameState(gameState);
     return;
   }
 
-  console.log(`Recovering ${missedTicks} missed world ticks from persisted state...`);
+  if (missedTicks > ticksToReplay) {
+    console.warn(
+      `Skipping ${missedTicks - ticksToReplay} stale startup ticks to keep boot responsive.`
+    );
+  }
+  console.log(`Recovering ${ticksToReplay} missed world ticks from persisted state...`);
 
-  for (let index = 0; index < missedTicks; index += 1) {
-    const tickTime = lastTickAt + (index + 1) * AUTO_TICK_MS;
+  const recoveryStartTickTime = now - ticksToReplay * AUTO_TICK_MS;
+
+  for (let index = 0; index < ticksToReplay; index += 1) {
+    const tickTime = recoveryStartTickTime + (index + 1) * AUTO_TICK_MS;
     gameState.tick += 1;
     processWorldTick(tickTime);
   }
 
-  gameState.lastTickAt = lastTickAt + missedTicks * AUTO_TICK_MS;
-  await persistAndBroadcast();
+  gameState.lastTickAt = recoveryStartTickTime + ticksToReplay * AUTO_TICK_MS;
+  gameState.version += 1;
+  gameState.lastUpdate = Date.now();
+  await persistCurrentState();
   console.log(`World recovery complete. Tick is now ${gameState.tick}.`);
 }
 
@@ -1285,6 +1377,50 @@ function respondWithSnapshot(res, userId, extra = {}) {
     gameState: getGameSnapshot(userId),
     ...extra,
   });
+}
+
+function issueAuthToken(user) {
+  return jwt.sign(
+    { userId: user.id, email: user.email, username: user.username, isAdmin: user.isAdmin },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
+
+function makeUniqueUsername(seed) {
+  const base = String(seed || 'Player')
+    .replace(/[^a-zA-Z0-9_]/g, '')
+    .slice(0, 16) || 'Player';
+
+  const existing = new Set(Object.values(users).map((user) => user.username.toLowerCase()));
+  if (!existing.has(base.toLowerCase())) {
+    return base;
+  }
+
+  for (let index = 1; index <= 9999; index += 1) {
+    const candidate = `${base}${index}`;
+    if (!existing.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+
+  return `${base}${Date.now().toString().slice(-6)}`;
+}
+
+function parseClientRedirectOrigin(rawRedirect) {
+  const allowedOrigins = getAllowedClientOrigins();
+  if (!allowedOrigins.length) return null;
+
+  const fallback = allowedOrigins[0];
+  if (!rawRedirect) return fallback;
+
+  try {
+    const parsed = new URL(rawRedirect);
+    const origin = normalizeOrigin(parsed.origin);
+    return allowedOrigins.includes(origin) ? origin : fallback;
+  } catch (error) {
+    return fallback;
+  }
 }
 
 app.post('/api/auth/register', async (req, res) => {
@@ -1318,18 +1454,15 @@ app.post('/api/auth/register', async (req, res) => {
       password: hashedPassword,
       isAdmin,
       createdAt: new Date().toISOString(),
+      authProvider: 'email',
+      googleSub: null,
     };
 
     await saveUsers(users);
     ensurePlayerState(userId);
     await persistPlayerState(userId);
-    await saveGameState(gameState);
-
-    const token = jwt.sign(
-      { userId, email, username, isAdmin },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
+    await persistCurrentState();
+    const token = issueAuthToken(users[email]);
 
     return res.json({
       token,
@@ -1347,42 +1480,194 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const email = normalizeEmail(req.body.email);
-  const password = String(req.body.password || '');
+  try {
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || '');
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required' });
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    const user = users[email];
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    ensurePlayerState(user.id);
+    await persistPlayerState(user.id);
+    await saveGameState(gameState);
+
+    const token = issueAuthToken(user);
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        email,
+        username: user.username,
+        isAdmin: isAdminEmail(email),
+      },
+    });
+  } catch (error) {
+    console.error('Login failed:', error);
+    return res.status(500).json({ error: 'Server error while logging in.' });
+  }
+});
+
+app.get('/api/auth/google/start', (req, res) => {
+  if (!canUseGoogleOAuth()) {
+    return res.status(503).json({ error: 'Google OAuth is not configured on the server.' });
   }
 
-  const user = users[email];
-  if (!user) {
-    return res.status(401).json({ error: 'Invalid credentials' });
+  const redirectOrigin = parseClientRedirectOrigin(req.query.redirect);
+  if (!redirectOrigin) {
+    return res.status(400).json({ error: 'Google OAuth requires explicit CORS_ORIGIN values.' });
   }
 
-  const validPassword = await bcrypt.compare(password, user.password);
-  if (!validPassword) {
-    return res.status(401).json({ error: 'Invalid credentials' });
+  const state = randomBytes(24).toString('hex');
+  const expiresAt = Date.now() + GOOGLE_OAUTH_STATE_TTL_MS;
+
+  for (const [key, value] of googleOAuthStates.entries()) {
+    if (value.expiresAt <= Date.now()) {
+      googleOAuthStates.delete(key);
+    }
   }
 
-  ensurePlayerState(user.id);
-  await persistPlayerState(user.id);
-  await saveGameState(gameState);
-
-  const token = jwt.sign(
-    { userId: user.id, email, username: user.username, isAdmin: isAdminEmail(email) },
-    JWT_SECRET,
-    { expiresIn: '7d' }
-  );
-
-  return res.json({
-    token,
-    user: {
-      id: user.id,
-      email,
-      username: user.username,
-      isAdmin: isAdminEmail(email),
-    },
+  googleOAuthStates.set(state, {
+    redirectOrigin,
+    expiresAt,
   });
+
+  const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  authUrl.searchParams.set('client_id', GOOGLE_CLIENT_ID);
+  authUrl.searchParams.set('redirect_uri', buildGoogleCallbackUrl());
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('scope', 'openid email profile');
+  authUrl.searchParams.set('state', state);
+  authUrl.searchParams.set('prompt', 'select_account');
+
+  return res.redirect(authUrl.toString());
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+  const redirectWithError = (origin, message) => {
+    if (origin) {
+      const url = new URL(origin);
+      url.searchParams.set('authError', message);
+      return res.redirect(url.toString());
+    }
+    return res.status(400).json({ error: message });
+  };
+
+  try {
+    if (!canUseGoogleOAuth()) {
+      return res.status(503).json({ error: 'Google OAuth is not configured on the server.' });
+    }
+
+    const state = String(req.query.state || '');
+    const code = String(req.query.code || '');
+    const stateRecord = googleOAuthStates.get(state);
+    const redirectOrigin = stateRecord?.redirectOrigin || parseClientRedirectOrigin(null);
+
+    if (!stateRecord || stateRecord.expiresAt <= Date.now()) {
+      googleOAuthStates.delete(state);
+      return redirectWithError(redirectOrigin, 'Google sign-in session expired. Try again.');
+    }
+    googleOAuthStates.delete(state);
+
+    if (!code) {
+      return redirectWithError(redirectOrigin, 'Google did not return an authorization code.');
+    }
+
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: buildGoogleCallbackUrl(),
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const details = await tokenResponse.text();
+      console.error('Google token exchange failed:', details);
+      return redirectWithError(redirectOrigin, 'Google token exchange failed.');
+    }
+
+    const tokenData = await tokenResponse.json();
+    const idToken = String(tokenData.id_token || '');
+    if (!idToken) {
+      return redirectWithError(redirectOrigin, 'Google did not return an ID token.');
+    }
+
+    const verifyResponse = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
+    if (!verifyResponse.ok) {
+      const details = await verifyResponse.text();
+      console.error('Google token verification failed:', details);
+      return redirectWithError(redirectOrigin, 'Failed to verify Google identity.');
+    }
+
+    const googleProfile = await verifyResponse.json();
+    if (googleProfile.aud !== GOOGLE_CLIENT_ID) {
+      return redirectWithError(redirectOrigin, 'Google token audience mismatch.');
+    }
+
+    if (String(googleProfile.email_verified || '').toLowerCase() !== 'true') {
+      return redirectWithError(redirectOrigin, 'Google account email is not verified.');
+    }
+
+    const email = normalizeEmail(googleProfile.email);
+    const googleSub = String(googleProfile.sub || '');
+    if (!email || !googleSub) {
+      return redirectWithError(redirectOrigin, 'Google profile is missing required fields.');
+    }
+
+    const existingUser = users[email];
+    if (existingUser) {
+      if (existingUser.googleSub && existingUser.googleSub !== googleSub) {
+        return redirectWithError(redirectOrigin, 'This email is linked to a different Google account.');
+      }
+      existingUser.googleSub = googleSub;
+      if (!existingUser.authProvider) {
+        existingUser.authProvider = 'email';
+      }
+      existingUser.isAdmin = isAdminEmail(existingUser.email);
+    } else {
+      const newUser = {
+        id: uuidv4(),
+        email,
+        username: makeUniqueUsername(googleProfile.name || email.split('@')[0]),
+        password: await bcrypt.hash(randomBytes(32).toString('hex'), 10),
+        isAdmin: isAdminEmail(email),
+        createdAt: new Date().toISOString(),
+        authProvider: 'google',
+        googleSub,
+      };
+      users[email] = newUser;
+    }
+
+    const user = users[email];
+    await saveUsers(users);
+    ensurePlayerState(user.id);
+    await persistPlayerState(user.id);
+    await persistCurrentState();
+
+    const token = issueAuthToken(user);
+    const redirectUrl = new URL(redirectOrigin);
+    redirectUrl.searchParams.set('authToken', token);
+    return res.redirect(redirectUrl.toString());
+  } catch (error) {
+    console.error('Google callback failed:', error);
+    const fallbackOrigin = parseClientRedirectOrigin(null);
+    return redirectWithError(fallbackOrigin, 'Google sign-in failed due to a server error.');
+  }
 });
 
 app.get('/api/auth/me', authenticateToken, (req, res) => {
@@ -1463,7 +1748,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.stored = 0;
         tile.characters = [];
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `Bought ${tile.resource} land for ${price} copper.`,
         });
@@ -1486,7 +1771,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         gameState.landPrices[tile.resource] = nextLandPriceOnSell(tile.resource);
         gameState.map = gameState.map.filter((entry) => entry.id !== tile.id);
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `Burned land for ${tokens} Star Tokens!`,
         });
@@ -1512,7 +1797,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.timer = BASE_PRODUCTION_TIME[tile.resource];
         tile.depleted = false;
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `Sold ${tile.resource} land for ${payout.toFixed(3)} copper.`,
         });
@@ -1526,7 +1811,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
 
         const boostedAmount = collectFromTile(player, tile, tile.stored);
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `Collected ${boostedAmount.toFixed(3)} ${tile.resource}.`,
         });
@@ -1550,7 +1835,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.inventory = payCost(cost, player.inventory);
         tile.storageLevel = nextLevel;
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `Upgraded storage to level ${nextLevel}.`,
         });
@@ -1573,7 +1858,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.inventory[resource] = Number((player.inventory[resource] - amount).toFixed(3));
         player.copper = Number((player.copper + amount * gameState.market[resource]).toFixed(6));
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `Sold ${amount.toFixed(3)} ${resource}.`,
         });
@@ -1604,7 +1889,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
           message = `${message} Found ${STAR_TOKEN_CHEST_BONUS_AMOUNT} Blue Star Tokens!`;
         }
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message,
           wonCharacter,
@@ -1624,7 +1909,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.charactersOwned = [...player.charactersOwned, wonCharacter];
         player.nickel += RARITY_META[wonCharacter.rarity].stars;
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: 'Opened Exclusive Box with Star Tokens!',
           wonCharacter,
@@ -1660,7 +1945,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         const fusedCharacter = createCharacterInstance('fusion', resultRarity);
         player.charactersOwned = [...player.charactersOwned, fusedCharacter];
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `Fused 3 ${RARITY_META[sourceRarity].label} characters into 1 ${RARITY_META[resultRarity].label} character.`,
           fusedCharacter,
@@ -1683,7 +1968,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         const [character] = player.charactersOwned.splice(charIndex, 1);
         tile.characters = [...tile.characters, character];
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `${character.name} assigned to ${tile.resource} land.`,
         });
@@ -1701,7 +1986,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.characters = tile.characters.filter((_, currentIndex) => currentIndex !== index);
         player.charactersOwned = [...player.charactersOwned, removed];
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: `${removed.name} returned to inventory.`,
         });
@@ -1716,7 +2001,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.autoCollectActive = true;
         player.autoCollectTimeRemaining += AUTO_COLLECT_DURATION;
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: 'Auto-collect extended by 30 minutes.',
         });
@@ -1744,7 +2029,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         tile.r = targetR;
         tile.id = keyOf(targetQ, targetR);
 
-        await persistAndBroadcast();
+        publishStateChange();
         return respondWithSnapshot(res, userId, {
           message: 'Land moved.',
         });
@@ -1772,7 +2057,7 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
 
         gameState = createDefaultGameState();
         await resetAllPlayerStates();
-        await persistAndBroadcast();
+        publishStateChange();
         io.emit('gameTick', { tick: gameState.tick, refreshedBy: 'admin-reset' });
 
         return respondWithSnapshot(res, userId, {
@@ -2084,9 +2369,11 @@ let autoTickInterval = null;
 let shuttingDown = false;
 
 async function flushStateToDisk() {
+  if (persistenceInFlight) {
+    await persistenceInFlight;
+  }
   await saveUsers(users);
-  await saveGameState(gameState);
-  await persistAllPlayerStates();
+  await persistCurrentState();
 }
 
 async function shutdownServer(signal) {

@@ -3,11 +3,12 @@ import React, { useState } from 'react';
 type AuthProps = {
   onLogin: (email: string, password: string) => Promise<boolean>;
   onRegister: (email: string, password: string, username: string) => Promise<boolean>;
+  onGoogleSignIn: () => void;
   error: string | null;
   loading: boolean;
 };
 
-export function Auth({ onLogin, onRegister, error, loading }: AuthProps) {
+export function Auth({ onLogin, onRegister, onGoogleSignIn, error, loading }: AuthProps) {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -94,6 +95,15 @@ export function Auth({ onLogin, onRegister, error, loading }: AuthProps) {
             className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {loading ? 'Please wait...' : isLogin ? 'Sign In' : 'Create Account'}
+          </button>
+
+          <button
+            type="button"
+            onClick={onGoogleSignIn}
+            disabled={loading}
+            className="w-full rounded-xl border border-slate-600 bg-white px-4 py-3 font-bold text-slate-900 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Continue with Google
           </button>
         </form>
 

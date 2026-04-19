@@ -229,7 +229,7 @@ const EMPTY_LAND_PRICES: LandPriceState = { wheat: 30, wood: 60, brick: 80, ore:
 const EMPTY_HISTORY: HistoryPoint[] = [{ minute: 0, label: '00:00', wheat: 3, brick: 5, ore: 6, wood: 4 }];
 
 export default function HexLandGame() {
-  const { user, token, isAuthenticated, isAdmin, loading: authLoading, error: authError, login, register, logout } = useAuth();
+  const { user, token, isAuthenticated, isAdmin, loading: authLoading, error: authError, login, register, logout, startGoogleSignIn } = useAuth();
   const {
     isConnected,
     username,
@@ -666,7 +666,13 @@ export default function HexLandGame() {
       >
         <polygon points={`${-HEX_SIZE * 0.866},${HEX_SIZE / 2} 0,${HEX_SIZE} 0,${HEX_SIZE + TILE_HEIGHT} ${-HEX_SIZE * 0.866},${HEX_SIZE / 2 + TILE_HEIGHT}`} fill={depleted ? '#0f172a' : mine ? info.side : '#111'} />
         <polygon points={`0,${HEX_SIZE} ${HEX_SIZE * 0.866},${HEX_SIZE / 2} ${HEX_SIZE * 0.866},${HEX_SIZE / 2 + TILE_HEIGHT} 0,${HEX_SIZE + TILE_HEIGHT}`} fill={depleted ? '#1e293b' : mine ? info.dark : '#1b1b1b'} />
-        <polygon points={topPoints(HEX_SIZE)} fill={fill} stroke={selected ? '#60a5fa' : '#404040'} strokeWidth={selected ? 3 : 1.2} />
+        <polygon
+          points={topPoints(HEX_SIZE)}
+          fill={fill}
+          stroke={selected ? '#60a5fa' : mine ? 'rgba(255,255,255,0.9)' : '#404040'}
+          strokeWidth={selected ? 3 : mine ? 1.8 : 1.2}
+          style={mine ? { filter: 'drop-shadow(0 0 4px rgba(255,255,255,0.55))' } : undefined}
+        />
 
         {depleted && (
           <>
@@ -705,7 +711,7 @@ export default function HexLandGame() {
   }
 
   if (!isAuthenticated) {
-    return <Auth onLogin={login} onRegister={register} error={authError} loading={authLoading} />;
+    return <Auth onLogin={login} onRegister={register} onGoogleSignIn={startGoogleSignIn} error={authError} loading={authLoading} />;
   }
 
   if (SERVER_CONFIG_ERROR) {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { SERVER_CONFIG_ERROR, SERVER_URL } from '../config';
+import { GOOGLE_AUTH_URL, SERVER_CONFIG_ERROR, SERVER_URL } from '../config';
 
 type User = {
   id: string;
@@ -13,6 +13,37 @@ export function useAuth() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('hexWorldToken'));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const currentUrl = new URL(window.location.href);
+    const authToken = currentUrl.searchParams.get('authToken');
+    const authError = currentUrl.searchParams.get('authError');
+
+    if (!authToken && !authError) {
+      return;
+    }
+
+    currentUrl.searchParams.delete('authToken');
+    currentUrl.searchParams.delete('authError');
+    window.history.replaceState({}, '', currentUrl.toString());
+
+    if (authToken) {
+      localStorage.setItem('hexWorldToken', authToken);
+      setToken(authToken);
+      setError(null);
+      return;
+    }
+
+    if (authError) {
+      setError(authError);
+      localStorage.removeItem('hexWorldToken');
+      setToken(null);
+    }
+  }, []);
 
   // Check if user is already logged in
   useEffect(() => {
@@ -129,6 +160,18 @@ export function useAuth() {
     setError(null);
   }, []);
 
+  const startGoogleSignIn = useCallback(() => {
+    setError(null);
+
+    if (!GOOGLE_AUTH_URL || SERVER_CONFIG_ERROR) {
+      setError(SERVER_CONFIG_ERROR || 'Google sign-in is not configured.');
+      return;
+    }
+
+    const redirect = typeof window !== 'undefined' ? window.location.origin : '';
+    window.location.href = `${GOOGLE_AUTH_URL}?redirect=${encodeURIComponent(redirect)}`;
+  }, []);
+
   return {
     user,
     token,
@@ -138,6 +181,7 @@ export function useAuth() {
     isAdmin: user?.isAdmin || false,
     login,
     register,
-    logout
+    logout,
+    startGoogleSignIn,
   };
 }
