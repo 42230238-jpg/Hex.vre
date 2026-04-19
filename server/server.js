@@ -62,7 +62,7 @@ const io = new Server(server, {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-const DATA_DIR = join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR ? process.env.DATA_DIR.trim() : join(__dirname, 'data');
 const PLAYER_DATA_DIR = join(DATA_DIR, 'players');
 const USERS_FILE = join(DATA_DIR, 'users.json');
 const GAME_STATE_FILE = join(DATA_DIR, 'gameState.json');
@@ -140,11 +140,11 @@ function isAdminEmail(email) {
 }
 
 if (!existsSync(DATA_DIR)) {
-  mkdirSync(DATA_DIR);
+  mkdirSync(DATA_DIR, { recursive: true });
 }
 
 if (!existsSync(PLAYER_DATA_DIR)) {
-  mkdirSync(PLAYER_DATA_DIR);
+  mkdirSync(PLAYER_DATA_DIR, { recursive: true });
 }
 
 const db = new DatabaseSync(DB_FILE);
@@ -456,10 +456,12 @@ function createDefaultPlayerState() {
 
 function createDefaultGameState() {
   const now = new Date();
+  const timestamp = now.getTime();
   return {
     version: 1,
     tick: 0,
-    lastUpdate: Date.now(),
+    lastUpdate: timestamp,
+    lastTickAt: timestamp,
     map: createInitialHexMap(),
     market: { ...INITIAL_MARKET },
     landPrices: { ...INITIAL_LAND_PRICES },
@@ -541,6 +543,8 @@ function loadGameState() {
       next.map = Array.isArray(parsed.map) && parsed.map.length ? parsed.map.map(normalizeTile) : createInitialHexMap();
       next.market = { ...INITIAL_MARKET, ...(parsed.market || {}) };
       next.landPrices = normalizeLandPrices(parsed.landPrices);
+      next.lastUpdate = Number.isFinite(parsed.lastUpdate) ? parsed.lastUpdate : Date.now();
+      next.lastTickAt = Number.isFinite(parsed.lastTickAt) ? parsed.lastTickAt : next.lastUpdate;
       next.historyDayKey = parsed.historyDayKey || getHistoryDayKey();
       next.historyMinute = Number.isFinite(parsed.historyMinute) ? parsed.historyMinute : getHistoryMinuteOfDay();
       next.history =
@@ -988,8 +992,7 @@ function collectFromTile(player, tile, amountToDrain) {
   return boostedAmount;
 }
 
-function updateMarketHistory() {
-  const now = new Date();
+function updateMarketHistory(now = new Date()) {
   const dayKey = getHistoryDayKey(now);
   const minuteOfDay = getHistoryMinuteOfDay(now);
 
@@ -1014,7 +1017,7 @@ function updateMarketHistory() {
   gameState.history = [...gameState.history, createHistoryPoint(minuteOfDay, gameState.market)].slice(-1440);
 }
 
-function processWorldTick() {
+function processWorldTick(tickTime = Date.now()) {
   const ownedTilesByPlayer = new Map();
 
   for (const tile of gameState.map) {
@@ -1127,21 +1130,50 @@ function processWorldTick() {
   }
 
   gameState.market = nextMarket;
-  updateMarketHistory();
+  updateMarketHistory(new Date(tickTime));
 }
 
 function runManualRefresh(refreshedBy = 'system') {
+  const tickTime = Date.now();
   gameState.tick += 1;
-  processWorldTick();
+  processWorldTick(tickTime);
+  gameState.lastTickAt = tickTime;
   persistAndBroadcast();
   io.emit('gameTick', { tick: gameState.tick, refreshedBy });
 }
 
 function runAutoTick() {
+  const tickTime = Date.now();
   gameState.tick += 1;
-  processWorldTick();
+  processWorldTick(tickTime);
+  gameState.lastTickAt = tickTime;
   persistAndBroadcast();
   io.emit('gameTick', { tick: gameState.tick, refreshedBy: 'auto' });
+}
+
+function recoverWorldStateOnStartup() {
+  const now = Date.now();
+  const lastTickAt = Number.isFinite(gameState.lastTickAt) ? gameState.lastTickAt : now;
+  const elapsedMs = Math.max(0, now - lastTickAt);
+  const missedTicks = Math.floor(elapsedMs / AUTO_TICK_MS);
+
+  if (missedTicks <= 0) {
+    gameState.lastTickAt = now;
+    saveGameState(gameState);
+    return;
+  }
+
+  console.log(`Recovering ${missedTicks} missed world ticks from persisted state...`);
+
+  for (let index = 0; index < missedTicks; index += 1) {
+    const tickTime = lastTickAt + (index + 1) * AUTO_TICK_MS;
+    gameState.tick += 1;
+    processWorldTick(tickTime);
+  }
+
+  gameState.lastTickAt = lastTickAt + missedTicks * AUTO_TICK_MS;
+  persistAndBroadcast();
+  console.log(`World recovery complete. Tick is now ${gameState.tick}.`);
 }
 
 function respondWithSnapshot(res, userId, extra = {}) {
@@ -1920,16 +1952,58 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3001;
+let autoTickInterval = null;
+let shuttingDown = false;
+
+function flushStateToDisk() {
+  saveUsers(users);
+  saveGameState(gameState);
+  persistAllPlayerStates();
+}
+
+function shutdownServer(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  if (autoTickInterval) {
+    clearInterval(autoTickInterval);
+    autoTickInterval = null;
+  }
+
+  try {
+    flushStateToDisk();
+  } catch (error) {
+    console.error(`Failed to flush state during ${signal}:`, error);
+  }
+
+  server.close(() => {
+    console.log(`Hex World Server stopped after ${signal}.`);
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    console.error(`Forced shutdown after ${signal}.`);
+    process.exit(1);
+  }, 10000).unref();
+}
+
+recoverWorldStateOnStartup();
+
 server.listen(PORT, () => {
   console.log(`Hex World Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin email: ${ADMIN_EMAIL}`);
+  console.log(`Data directory: ${DATA_DIR}`);
+  console.log(`SQLite database: ${DB_FILE}`);
 });
 
-setInterval(() => {
+autoTickInterval = setInterval(() => {
   try {
     runAutoTick();
   } catch (error) {
     console.error('Automatic world tick failed:', error);
   }
 }, AUTO_TICK_MS);
+
+process.on('SIGINT', () => shutdownServer('SIGINT'));
+process.on('SIGTERM', () => shutdownServer('SIGTERM'));

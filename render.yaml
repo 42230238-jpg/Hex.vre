@@ -12,6 +12,8 @@ services:
         value: 24.14.1
       - key: PORT
         value: 3001
+      - key: DATA_DIR
+        value: /var/data/hex-world
       - key: JWT_SECRET
         sync: false
       - key: ADMIN_EMAIL
@@ -20,5 +22,5 @@ services:
         sync: false
     disk:
       name: hex-world-data
-      mountPath: /opt/render/project/src/server/data
+      mountPath: /var/data/hex-world
       sizeGB: 1

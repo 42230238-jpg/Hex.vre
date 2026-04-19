@@ -34,9 +34,10 @@ PORT=3001
 
 Important notes:
 
-- The backend uses SQLite at `server/data/hexworld.db`.
-- Render must have a persistent disk attached or your save data will reset on redeploy.
-- The included `render.yaml` mounts that disk at `/opt/render/project/src/server/data`.
+- The backend uses SQLite at the directory in `DATA_DIR`.
+- For local development, `DATA_DIR` defaults to `server/data`.
+- On Render, `DATA_DIR` should point at a mounted persistent disk so restarts and redeploys keep the same SQLite database.
+- The included `render.yaml` sets `DATA_DIR=/var/data/hex-world` and mounts the persistent disk at `/var/data/hex-world`.
 
 After deploy, your backend URL will look something like:
 
@@ -135,7 +136,14 @@ If the site opens but multiplayer does not connect:
 If data disappears after deploy:
 
 - Confirm the Render persistent disk is attached
-- Confirm the disk mount path matches `render.yaml`
+- Confirm the disk mount path is `/var/data/hex-world`
+- Confirm the `DATA_DIR` environment variable is also `/var/data/hex-world`
+
+If the server restarts after downtime:
+
+- The backend now reloads the latest persisted SQLite world state on boot
+- The server replays missed world ticks based on the persisted `lastTickAt` timestamp
+- Land timers, auto-collect countdowns, market updates, world expansion, and player progress continue from persisted state instead of starting over
 
 ## 9. What This Does Not Do Automatically
 
