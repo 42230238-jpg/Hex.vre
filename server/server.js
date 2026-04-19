@@ -37,6 +37,18 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+function isBcryptHash(password) {
+  return /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(String(password || ''));
+}
+
+function normalizeBcryptHashPrefix(password) {
+  const raw = String(password || '');
+  if (raw.startsWith('$2y$')) {
+    return `$2b$${raw.slice(4)}`;
+  }
+  return raw;
+}
+
 function normalizeOrigin(origin) {
   const trimmed = String(origin || '').trim();
   if (!trimmed || trimmed === '*') return trimmed;
@@ -311,7 +323,7 @@ async function loadUsers() {
         id: row.id,
         email: normalizeEmail(row.email),
         username: row.username,
-        password: row.password,
+        password: normalizeBcryptHashPrefix(row.password),
         isAdmin: Boolean(row.is_admin) || isAdminEmail(row.email),
         createdAt: row.created_at,
         authProvider: row.auth_provider || 'email',
@@ -1466,6 +1478,10 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     if (users[email]) {
+      const existing = users[email];
+      if (existing.authProvider === 'google' && existing.googleSub) {
+        return res.status(409).json({ error: 'This email is registered with Google. Use Continue with Google.' });
+      }
       return res.status(409).json({ error: 'Email already registered' });
     }
 
@@ -1525,8 +1541,24 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const validPassword = await bcrypt.compare(password, user.password);
+    const storedPassword = normalizeBcryptHashPrefix(user.password);
+    let validPassword = false;
+
+    if (isBcryptHash(storedPassword)) {
+      validPassword = await bcrypt.compare(password, storedPassword);
+    } else {
+      // Legacy migrations may have imported plaintext passwords; allow one-time upgrade.
+      validPassword = password === storedPassword;
+      if (validPassword) {
+        user.password = await bcrypt.hash(password, 10);
+        await saveUsers(users);
+      }
+    }
+
     if (!validPassword) {
+      if (user.authProvider === 'google' && user.googleSub) {
+        return res.status(401).json({ error: 'This account uses Google sign-in. Use Continue with Google.' });
+      }
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
