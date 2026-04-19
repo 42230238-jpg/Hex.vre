@@ -218,7 +218,7 @@ await db.executeMultiple(`
     is_admin INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     auth_provider TEXT NOT NULL DEFAULT 'email',
-    google_sub TEXT UNIQUE
+    google_sub TEXT
   );
   CREATE TABLE IF NOT EXISTS player_states (
     user_id TEXT PRIMARY KEY,
@@ -233,7 +233,7 @@ await db.executeMultiple(`
 async function ensureUserAuthColumns() {
   const statements = [
     `ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'email'`,
-    `ALTER TABLE users ADD COLUMN google_sub TEXT UNIQUE`,
+    `ALTER TABLE users ADD COLUMN google_sub TEXT`,
   ];
 
   for (const sql of statements) {
@@ -249,6 +249,38 @@ async function ensureUserAuthColumns() {
 }
 
 await ensureUserAuthColumns();
+
+async function normalizeDuplicateGoogleSubs() {
+  const duplicateRows = await dbAll(
+    `
+      SELECT google_sub, GROUP_CONCAT(email) AS emails, COUNT(*) AS count
+      FROM users
+      WHERE google_sub IS NOT NULL
+      GROUP BY google_sub
+      HAVING COUNT(*) > 1
+    `
+  );
+
+  for (const row of duplicateRows) {
+    const emails = String(row.emails || '')
+      .split(',')
+      .map((email) => normalizeEmail(email))
+      .filter(Boolean);
+
+    if (emails.length <= 1) continue;
+
+    const [, ...conflictingEmails] = emails;
+    const placeholders = conflictingEmails.map(() => '?').join(', ');
+    await dbRun(`UPDATE users SET google_sub = NULL WHERE email IN (${placeholders})`, conflictingEmails);
+  }
+}
+
+async function ensureUserGoogleSubIndex() {
+  await normalizeDuplicateGoogleSubs();
+  await dbRun('CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique_idx ON users (google_sub)');
+}
+
+await ensureUserGoogleSubIndex();
 
 function mapRows(result) {
   return result.rows.map((row) =>
