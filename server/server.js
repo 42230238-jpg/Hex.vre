@@ -24,6 +24,8 @@ const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN;
 const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || '').trim();
 const GOOGLE_CLIENT_SECRET = String(process.env.GOOGLE_CLIENT_SECRET || '').trim();
 const SERVER_PUBLIC_URL = normalizeOrigin(process.env.SERVER_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '');
+const ADMIN_RECOVERY_PASSWORD = String(process.env.ADMIN_RECOVERY_PASSWORD || '');
+const ADMIN_RECOVERY_CLEAR_GOOGLE_SUB = String(process.env.ADMIN_RECOVERY_CLEAR_GOOGLE_SUB || '').toLowerCase() === 'true';
 const CLIENT_ORIGINS = (process.env.CORS_ORIGIN || process.env.CLIENT_URL || '*')
   .split(',')
   .map((origin) => normalizeOrigin(origin))
@@ -53,6 +55,14 @@ function normalizeOrigin(origin) {
   const trimmed = String(origin || '').trim();
   if (!trimmed || trimmed === '*') return trimmed;
   return trimmed.replace(/\/+$/, '');
+}
+
+function classifyPasswordField(password) {
+  const raw = String(password ?? '');
+  if (!raw) return 'null_or_empty';
+  if (isBcryptHash(normalizeBcryptHashPrefix(raw))) return 'bcrypt';
+  if (raw.includes('$2') && !isBcryptHash(normalizeBcryptHashPrefix(raw))) return 'malformed_hash';
+  return 'plaintext_or_legacy';
 }
 
 function isAllowedOrigin(origin) {
@@ -808,6 +818,45 @@ const googleOAuthStates = new Map();
 const TRADE_INVITE_MUTE_MS = 10 * 60 * 1000;
 const TRADE_COUNTDOWN_MS = 5000;
 const GOOGLE_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function logAdminAccountAudit() {
+  const adminEmail = normalizeEmail(ADMIN_EMAIL);
+  const user = users[adminEmail];
+  if (!user) {
+    console.warn(`Admin account audit: ${adminEmail} not found in users table.`);
+    return;
+  }
+
+  console.log('Admin account audit:', {
+    email: user.email,
+    authProvider: user.authProvider || 'email',
+    hasGoogleSub: Boolean(user.googleSub),
+    passwordKind: classifyPasswordField(user.password),
+  });
+}
+
+async function repairAdminAccountIfConfigured() {
+  if (!ADMIN_RECOVERY_PASSWORD) {
+    return;
+  }
+
+  const adminEmail = normalizeEmail(ADMIN_EMAIL);
+  const user = users[adminEmail];
+  if (!user) {
+    console.warn(`Admin account recovery skipped: ${adminEmail} not found.`);
+    return;
+  }
+
+  user.password = await bcrypt.hash(ADMIN_RECOVERY_PASSWORD, 10);
+  user.authProvider = 'email';
+  if (ADMIN_RECOVERY_CLEAR_GOOGLE_SUB) {
+    user.googleSub = null;
+  }
+  user.isAdmin = isAdminEmail(user.email);
+
+  await saveUsers(users);
+  console.log('Admin account recovery applied for configured admin email.');
+}
 
 function getUserById(userId) {
   return Object.values(users).find((user) => user.id === userId) || null;
@@ -2466,6 +2515,9 @@ async function shutdownServer(signal) {
   }, 10000).unref();
 }
 
+logAdminAccountAudit();
+await repairAdminAccountIfConfigured();
+logAdminAccountAudit();
 await recoverWorldStateOnStartup();
 
 server.listen(PORT, () => {
