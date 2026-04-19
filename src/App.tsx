@@ -74,15 +74,15 @@ const DEFAULT_GAME_CONFIG: GameConfig = {
       starTokenBonusChance: 0.0002,
     },
     gold: {
-      rarities: { rare: 0.42, very_rare: 0.33, epic: 0.18, mythic: 0.064, legendary: 0.006 },
+      rarities: { very_rare: 0.5, epic: 0.32, mythic: 0.16, legendary: 0.02 },
       starTokenBonusChance: 0.0002,
     },
     diamond: {
-      rarities: { rare: 0.18, very_rare: 0.3, epic: 0.3, mythic: 0.195, legendary: 0.025 },
+      rarities: { very_rare: 0.34, epic: 0.38, mythic: 0.24, legendary: 0.04 },
       starTokenBonusChance: 0.0002,
     },
     exclusive: {
-      rarities: { very_rare: 0.2, epic: 0.3, mythic: 0.3, legendary: 0.199, exclusive: 0.001 },
+      rarities: { exclusive: 1 },
       starTokenBonusChance: 0,
     },
   },
@@ -159,10 +159,9 @@ function createPreviewCharacter(type: ChestType, config: GameConfig): Character 
   let specialAbility: SpecialAbility | undefined;
   if (type === 'exclusive') {
     const roll = Math.random();
-    if (roll < 0.0005) specialAbility = 'daily_copper';
-    else if (roll < 0.005) specialAbility = 'auto_collect_adjacent';
-    else if (roll < 0.05) specialAbility = 'auto_collect_single';
-    else if (roll < 0.3) specialAbility = 'triple_production';
+    if (roll < 0.01) specialAbility = 'daily_copper';
+    else if (roll < 0.16) specialAbility = 'auto_collect_single';
+    else if (roll < 0.46) specialAbility = 'triple_production';
     else specialAbility = 'double_production';
   }
 
@@ -170,8 +169,7 @@ function createPreviewCharacter(type: ChestType, config: GameConfig): Character 
   if (specialAbility === 'double_production') ability = 'Doubles production (2x speed)';
   if (specialAbility === 'triple_production') ability = 'Triples production (3x speed)';
   if (specialAbility === 'auto_collect_single') ability = 'Auto-collects from assigned land';
-  if (specialAbility === 'auto_collect_adjacent') ability = 'Auto-collects from 6 adjacent lands';
-  if (specialAbility === 'daily_copper') ability = 'Generates 1 copper per day';
+  if (specialAbility === 'daily_copper') ability = 'Generates 5 copper every 24 hours';
 
   return {
     ...base,
