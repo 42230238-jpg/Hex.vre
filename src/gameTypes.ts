@@ -40,6 +40,26 @@ export type InventoryState = Record<ResourceType, number>;
 export type LandPriceState = Record<ResourceType, number>;
 export type HistoryPoint = { minute: number; label: string } & MarketState;
 export type ResourceCost = Partial<Record<ResourceType, number>>;
+export type RarityChances = Partial<Record<Rarity, number>>;
+
+export type ChestDropConfig = {
+  rarities: RarityChances;
+  starTokenBonusChance: number;
+};
+
+export type FusionConfig = {
+  requiredCount: number;
+  resultByRarity: Partial<Record<Rarity, Rarity>>;
+};
+
+export type GameConfig = {
+  chestCosts: Record<ChestType, ResourceCost>;
+  chestDropRates: Record<ChestType, ChestDropConfig>;
+  exclusiveStarCost: number;
+  maxCharacterInventory: number;
+  starTokenBonusAmount: number;
+  fusion: FusionConfig;
+};
 
 export type PlayerGameState = {
   copper: number;
@@ -60,6 +80,7 @@ export type WorldGameState = {
 };
 
 export type GameSnapshot = {
+  config: GameConfig;
   world: WorldGameState;
   player: PlayerGameState;
 };
@@ -69,6 +90,7 @@ export type GameActionResult = {
   error?: string;
   gameState?: GameSnapshot;
   wonCharacter?: Character;
+  fusedCharacter?: Character;
 };
 
 export type TradeOffer = {

@@ -100,9 +100,50 @@ const LEGACY_LAND_PRICE_DEFAULTS = { wheat: 100, brick: 260, ore: 350, wood: 180
 
 const CHEST_COSTS = {
   brown: { wheat: 240, wood: 96 },
-  gold: { wheat: 480, wood: 240, brick: 144 },
-  diamond: { wheat: 960, wood: 480, brick: 280, ore: 160 },
+  gold: { wheat: 120, wood: 300, brick: 200, ore: 200 },
+  diamond: { wheat: 150, wood: 300, brick: 750, ore: 500 },
   exclusive: {},
+};
+
+const EXCLUSIVE_STAR_COST = 500;
+const STAR_TOKEN_CHEST_BONUS_CHANCE = 0.0002;
+const STAR_TOKEN_CHEST_BONUS_AMOUNT = 10;
+const FUSION_REQUIRED_COUNT = 3;
+const FUSION_RESULT_BY_RARITY = {
+  rare: 'very_rare',
+  very_rare: 'epic',
+  epic: 'mythic',
+  mythic: 'legendary',
+};
+const CHEST_DROP_RATES = {
+  brown: {
+    rare: 0.74,
+    very_rare: 0.2,
+    epic: 0.05,
+    mythic: 0.009,
+    legendary: 0.001,
+  },
+  gold: {
+    rare: 0.42,
+    very_rare: 0.33,
+    epic: 0.18,
+    mythic: 0.064,
+    legendary: 0.006,
+  },
+  diamond: {
+    rare: 0.18,
+    very_rare: 0.3,
+    epic: 0.3,
+    mythic: 0.195,
+    legendary: 0.025,
+  },
+  exclusive: {
+    very_rare: 0.2,
+    epic: 0.3,
+    mythic: 0.3,
+    legendary: 0.199,
+    exclusive: 0.001,
+  },
 };
 
 const UPGRADE_COSTS = {
@@ -197,23 +238,19 @@ function saveUsers(users) {
       created_at = excluded.created_at
   `);
 
-  const syncUsers = db.transaction((entries) => {
-    for (const user of entries) {
-      const email = normalizeEmail(user.email);
-      const isAdmin = Boolean(user.isAdmin) || isAdminEmail(email);
+  for (const user of Object.values(users)) {
+    const email = normalizeEmail(user.email);
+    const isAdmin = Boolean(user.isAdmin) || isAdminEmail(email);
 
-      upsertUser.run(
-        email,
-        user.id,
-        user.username,
-        user.password,
-        isAdmin ? 1 : 0,
-        user.createdAt
-      );
-    }
-  });
-
-  syncUsers(Object.values(users));
+    upsertUser.run(
+      email,
+      user.id,
+      user.username,
+      user.password,
+      isAdmin ? 1 : 0,
+      user.createdAt
+    );
+  }
 }
 
 function randomResource() {
@@ -320,48 +357,66 @@ function boostFromStars(stars) {
   return Number((min + (max - min) * cappedT).toFixed(3));
 }
 
-function rollRarityFromChest(type) {
-  const roll = Math.random();
-
-  if (type === 'exclusive') {
-    if (roll < 0.001) return 'exclusive';
-    if (roll < 0.2) return 'legendary';
-    if (roll < 0.5) return 'mythic';
-    if (roll < 0.8) return 'epic';
-    return 'very_rare';
-  }
-
-  if (type === 'brown') {
-    if (roll < 0.72) return 'rare';
-    if (roll < 0.94) return 'very_rare';
-    if (roll < 0.991) return 'epic';
-    if (roll < 0.9998) return 'mythic';
-    return 'legendary';
-  }
-
-  if (type === 'gold') {
-    if (roll < 0.38) return 'rare';
-    if (roll < 0.74) return 'very_rare';
-    if (roll < 0.94) return 'epic';
-    if (roll < 0.999) return 'mythic';
-    return 'legendary';
-  }
-
-  if (roll < 0.16) return 'rare';
-  if (roll < 0.42) return 'very_rare';
-  if (roll < 0.76) return 'epic';
-  if (roll < 0.995) return 'mythic';
-  return 'legendary';
+function getGameConfig() {
+  return {
+    chestCosts: CHEST_COSTS,
+    exclusiveStarCost: EXCLUSIVE_STAR_COST,
+    maxCharacterInventory: MAX_CHARACTER_INVENTORY,
+    starTokenBonusAmount: STAR_TOKEN_CHEST_BONUS_AMOUNT,
+    chestDropRates: {
+      brown: {
+        rarities: CHEST_DROP_RATES.brown,
+        starTokenBonusChance: STAR_TOKEN_CHEST_BONUS_CHANCE,
+      },
+      gold: {
+        rarities: CHEST_DROP_RATES.gold,
+        starTokenBonusChance: STAR_TOKEN_CHEST_BONUS_CHANCE,
+      },
+      diamond: {
+        rarities: CHEST_DROP_RATES.diamond,
+        starTokenBonusChance: STAR_TOKEN_CHEST_BONUS_CHANCE,
+      },
+      exclusive: {
+        rarities: CHEST_DROP_RATES.exclusive,
+        starTokenBonusChance: 0,
+      },
+    },
+    fusion: {
+      requiredCount: FUSION_REQUIRED_COUNT,
+      resultByRarity: FUSION_RESULT_BY_RARITY,
+    },
+  };
 }
 
-function createCharacterInstance(type) {
+function rollFromDistribution(distribution) {
+  const roll = Math.random();
+  let threshold = 0;
+  let fallback = null;
+
+  for (const [key, chance] of Object.entries(distribution)) {
+    fallback = key;
+    threshold += chance;
+    if (roll < threshold) {
+      return key;
+    }
+  }
+
+  return fallback;
+}
+
+function rollRarityFromChest(type) {
+  const rarity = rollFromDistribution(CHEST_DROP_RATES[type]);
+  return rarity || 'rare';
+}
+
+function createCharacterInstance(type, forcedRarity = null) {
   const base = CHARACTER_TEMPLATES[Math.floor(Math.random() * CHARACTER_TEMPLATES.length)];
-  const rarity = rollRarityFromChest(type);
+  const rarity = forcedRarity || rollRarityFromChest(type);
   const stars = RARITY_META[rarity].stars;
   const boost = rarity === 'exclusive' ? 0.18 : boostFromStars(stars);
 
   let specialAbility;
-  if (type === 'exclusive') {
+  if (type === 'exclusive' || rarity === 'exclusive') {
     const roll = Math.random();
     if (roll < 0.0005) specialAbility = 'daily_copper';
     else if (roll < 0.005) specialAbility = 'auto_collect_adjacent';
@@ -918,6 +973,7 @@ function finalizeTrade(tradeId) {
 
 function getGameSnapshot(userId) {
   return {
+    config: getGameConfig(),
     world: {
       tick: gameState.tick,
       map: gameState.map,
@@ -1495,21 +1551,9 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         player.nickel += RARITY_META[wonCharacter.rarity].stars;
 
         let message = `Opened ${type} chest.`;
-        const starRoll = Math.random();
-        if (starRoll < 0.01) {
-          let amount = 1;
-          const weight = Math.random() * 2000;
-          if (weight < 1) amount = 20;
-          else if (weight < 5) amount = 15;
-          else if (weight < 20) amount = 10;
-          else if (weight < 100) amount = 7;
-          else if (weight < 500) amount = 5;
-          else if (weight < 1000) amount = 3;
-          else amount = 2;
-          if (type === 'gold') amount = Math.min(20, amount + 2);
-          if (type === 'diamond') amount = Math.min(20, amount + 5);
-          player.starTokens += amount;
-          message = `${message} Found ${amount} Blue Star Tokens!`;
+        if (Math.random() < STAR_TOKEN_CHEST_BONUS_CHANCE) {
+          player.starTokens += STAR_TOKEN_CHEST_BONUS_AMOUNT;
+          message = `${message} Found ${STAR_TOKEN_CHEST_BONUS_AMOUNT} Blue Star Tokens!`;
         }
 
         persistAndBroadcast();
@@ -1523,11 +1567,11 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         if (player.charactersOwned.length >= MAX_CHARACTER_INVENTORY) {
           return res.status(400).json({ error: 'Character inventory full.' });
         }
-        if (player.starTokens < 500) {
-          return res.status(400).json({ error: `Need 500 Star Tokens (have ${player.starTokens}).` });
+        if (player.starTokens < EXCLUSIVE_STAR_COST) {
+          return res.status(400).json({ error: `Need ${EXCLUSIVE_STAR_COST} Star Tokens (have ${player.starTokens}).` });
         }
 
-        player.starTokens -= 500;
+        player.starTokens -= EXCLUSIVE_STAR_COST;
         const wonCharacter = createCharacterInstance('exclusive');
         player.charactersOwned = [...player.charactersOwned, wonCharacter];
         player.nickel += RARITY_META[wonCharacter.rarity].stars;
@@ -1536,6 +1580,42 @@ app.post('/api/game/action', authenticateToken, async (req, res) => {
         return respondWithSnapshot(res, userId, {
           message: 'Opened Exclusive Box with Star Tokens!',
           wonCharacter,
+        });
+      }
+
+      case 'fuseCharacters': {
+        const rawUids = Array.isArray(payload.uids) ? payload.uids : [];
+        const uniqueUids = [...new Set(rawUids.map((uid) => Number(uid)).filter((uid) => Number.isFinite(uid)))];
+
+        if (uniqueUids.length !== FUSION_REQUIRED_COUNT) {
+          return res.status(400).json({ error: `Select exactly ${FUSION_REQUIRED_COUNT} characters to fuse.` });
+        }
+
+        const selectedCharacters = uniqueUids.map((uid) => player.charactersOwned.find((character) => character.uid === uid));
+        if (selectedCharacters.some((character) => !character)) {
+          return res.status(404).json({ error: 'One or more selected characters are no longer in your inventory.' });
+        }
+
+        const sourceRarity = selectedCharacters[0].rarity;
+        if (!selectedCharacters.every((character) => character.rarity === sourceRarity)) {
+          return res.status(400).json({ error: 'Fusion requires 3 characters of the same rarity.' });
+        }
+
+        const resultRarity = FUSION_RESULT_BY_RARITY[sourceRarity];
+        if (!resultRarity) {
+          return res.status(400).json({ error: 'That rarity cannot be fused further.' });
+        }
+
+        const selectedUidSet = new Set(uniqueUids);
+        player.charactersOwned = player.charactersOwned.filter((character) => !selectedUidSet.has(character.uid));
+
+        const fusedCharacter = createCharacterInstance('fusion', resultRarity);
+        player.charactersOwned = [...player.charactersOwned, fusedCharacter];
+
+        persistAndBroadcast();
+        return respondWithSnapshot(res, userId, {
+          message: `Fused 3 ${RARITY_META[sourceRarity].label} characters into 1 ${RARITY_META[resultRarity].label} character.`,
+          fusedCharacter,
         });
       }
 

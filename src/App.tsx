@@ -9,6 +9,7 @@ import { SERVER_CONFIG_ERROR, SERVER_URL } from './config';
 import type {
   Character,
   ChestType,
+  GameConfig,
   GameActionResult,
   HistoryPoint,
   InventoryState,
@@ -25,7 +26,6 @@ import type {
 const AUTO_COLLECT_DURATION = 1800;
 const HEX_SIZE = 34;
 const TILE_HEIGHT = 16;
-const MAX_CHARACTER_INVENTORY = 50;
 const MAX_CHARACTERS_PER_LAND = 3;
 
 const STORAGE_LEVELS = [10, 30, 75, 150, 300, 600];
@@ -61,11 +61,43 @@ const CHARACTER_TEMPLATES = [
   { id: 10, name: 'Ranger', icon: '🏹', specialty: 'wood' as const, ability: 'Forest boost' },
 ] as const;
 
-const CHEST_COSTS: Record<ChestType, ResourceCost> = {
-  brown: { wheat: 240, wood: 96 },
-  gold: { wheat: 480, wood: 240, brick: 144 },
-  diamond: { wheat: 960, wood: 480, brick: 280, ore: 160 },
-  exclusive: {},
+const DEFAULT_GAME_CONFIG: GameConfig = {
+  chestCosts: {
+    brown: { wheat: 240, wood: 96 },
+    gold: { wheat: 120, wood: 300, brick: 200, ore: 200 },
+    diamond: { wheat: 150, wood: 300, brick: 750, ore: 500 },
+    exclusive: {},
+  },
+  chestDropRates: {
+    brown: {
+      rarities: { rare: 0.74, very_rare: 0.2, epic: 0.05, mythic: 0.009, legendary: 0.001 },
+      starTokenBonusChance: 0.0002,
+    },
+    gold: {
+      rarities: { rare: 0.42, very_rare: 0.33, epic: 0.18, mythic: 0.064, legendary: 0.006 },
+      starTokenBonusChance: 0.0002,
+    },
+    diamond: {
+      rarities: { rare: 0.18, very_rare: 0.3, epic: 0.3, mythic: 0.195, legendary: 0.025 },
+      starTokenBonusChance: 0.0002,
+    },
+    exclusive: {
+      rarities: { very_rare: 0.2, epic: 0.3, mythic: 0.3, legendary: 0.199, exclusive: 0.001 },
+      starTokenBonusChance: 0,
+    },
+  },
+  exclusiveStarCost: 500,
+  maxCharacterInventory: 50,
+  starTokenBonusAmount: 10,
+  fusion: {
+    requiredCount: 3,
+    resultByRarity: {
+      rare: 'very_rare',
+      very_rare: 'epic',
+      epic: 'mythic',
+      mythic: 'legendary',
+    },
+  },
 };
 
 const UPGRADE_COSTS: Record<number, ResourceCost> = {
@@ -98,43 +130,29 @@ function boostFromStars(stars: number) {
   return Number((min + (max - min) * cappedT).toFixed(3));
 }
 
-function rollRarityFromChest(type: ChestType): Rarity {
+function rollFromDistribution(distribution: Partial<Record<Rarity, number>>): Rarity {
   const roll = Math.random();
+  let threshold = 0;
+  let fallback: Rarity = 'rare';
 
-  if (type === 'exclusive') {
-    if (roll < 0.001) return 'exclusive';
-    if (roll < 0.2) return 'legendary';
-    if (roll < 0.5) return 'mythic';
-    if (roll < 0.8) return 'epic';
-    return 'very_rare';
+  for (const [rarity, chance] of Object.entries(distribution) as [Rarity, number][]) {
+    fallback = rarity;
+    threshold += chance;
+    if (roll < threshold) {
+      return rarity;
+    }
   }
 
-  if (type === 'brown') {
-    if (roll < 0.72) return 'rare';
-    if (roll < 0.94) return 'very_rare';
-    if (roll < 0.991) return 'epic';
-    if (roll < 0.9998) return 'mythic';
-    return 'legendary';
-  }
-
-  if (type === 'gold') {
-    if (roll < 0.38) return 'rare';
-    if (roll < 0.74) return 'very_rare';
-    if (roll < 0.94) return 'epic';
-    if (roll < 0.999) return 'mythic';
-    return 'legendary';
-  }
-
-  if (roll < 0.16) return 'rare';
-  if (roll < 0.42) return 'very_rare';
-  if (roll < 0.76) return 'epic';
-  if (roll < 0.995) return 'mythic';
-  return 'legendary';
+  return fallback;
 }
 
-function createPreviewCharacter(type: ChestType): Character {
+function rollRarityFromChest(type: ChestType, config: GameConfig): Rarity {
+  return rollFromDistribution(config.chestDropRates[type].rarities);
+}
+
+function createPreviewCharacter(type: ChestType, config: GameConfig): Character {
   const base = CHARACTER_TEMPLATES[Math.floor(Math.random() * CHARACTER_TEMPLATES.length)];
-  const rarity = rollRarityFromChest(type);
+  const rarity = rollRarityFromChest(type, config);
   const stars = RARITY_META[rarity].stars;
   const boost = rarity === 'exclusive' ? 0.18 : boostFromStars(stars);
 
@@ -180,6 +198,16 @@ function getSynergyBonus(tile: Tile) {
 
 function canAfford(cost: ResourceCost, inventory: InventoryState) {
   return RESOURCE_ORDER.every((resource) => (cost[resource] ?? 0) <= inventory[resource]);
+}
+
+function formatResourceCost(cost: ResourceCost) {
+  return RESOURCE_ORDER.filter((resource) => (cost[resource] ?? 0) > 0)
+    .map((resource) => `${RESOURCE_INFO[resource].label} ${cost[resource]}`)
+    .join(' / ');
+}
+
+function formatPercent(chance: number) {
+  return `${(chance * 100).toFixed(chance >= 0.01 ? 1 : 2)}%`;
 }
 
 function darkerFill(tile: Tile, selectedId: string | null, currentUserId: string | undefined) {
@@ -233,7 +261,9 @@ export default function HexLandGame() {
   const [rolling, setRolling] = useState(false);
   const [rollPreview, setRollPreview] = useState<Character[]>([]);
   const [wonCharacter, setWonCharacter] = useState<Character | null>(null);
+  const [fusedCharacter, setFusedCharacter] = useState<Character | null>(null);
   const [showCharInv, setShowCharInv] = useState(false);
+  const [selectedFusionUids, setSelectedFusionUids] = useState<number[]>([]);
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetPassword, setResetPassword] = useState('');
   const [resettingWorld, setResettingWorld] = useState(false);
@@ -253,11 +283,15 @@ export default function HexLandGame() {
   const landPrices = gameState?.world.landPrices ?? EMPTY_LAND_PRICES;
   const history = gameState?.world.history ?? EMPTY_HISTORY;
   const player = gameState?.player;
+  const gameConfig = gameState?.config ?? DEFAULT_GAME_CONFIG;
+  const chestCosts = gameConfig.chestCosts;
+  const fusionConfig = gameConfig.fusion;
   const copper = player?.copper ?? 0;
   const starTokens = player?.starTokens ?? 0;
   const nickel = player?.nickel ?? 0;
   const inventory = player?.inventory ?? EMPTY_INVENTORY;
   const charactersOwned = player?.charactersOwned ?? [];
+  const maxCharacterInventory = gameConfig.maxCharacterInventory;
   const autoCollectActive = player?.autoCollectActive ?? false;
   const autoCollectTimeRemaining = player?.autoCollectTimeRemaining ?? 0;
   const tradeOffer = activeTrade?.self.offer ?? null;
@@ -271,6 +305,11 @@ export default function HexLandGame() {
       setSelectedId(null);
     }
   }, [map, selectedId]);
+
+  useEffect(() => {
+    const ownedUidSet = new Set(charactersOwned.map((character) => character.uid));
+    setSelectedFusionUids((current) => current.filter((uid) => ownedUidSet.has(uid)).slice(0, fusionConfig.requiredCount));
+  }, [charactersOwned, fusionConfig.requiredCount]);
 
   useEffect(() => {
     if (error) {
@@ -316,6 +355,22 @@ export default function HexLandGame() {
     selectedTile && selectedTile.ownerId === user?.id
       ? Number((selectedTile.stored * (1 + selectedCollectBoost)).toFixed(3))
       : 0;
+  const selectedFusionCharacters = selectedFusionUids
+    .map((uid) => charactersOwned.find((character) => character.uid === uid) ?? null)
+    .filter((character): character is Character => Boolean(character));
+  const selectedFusionRarity = selectedFusionCharacters[0]?.rarity ?? null;
+  const fusionResultRarity = selectedFusionRarity ? fusionConfig.resultByRarity[selectedFusionRarity] ?? null : null;
+  const fusionSelectionError =
+    selectedFusionCharacters.length === 0
+      ? `Select ${fusionConfig.requiredCount} characters of the same rarity.`
+      : selectedFusionCharacters.length !== fusionConfig.requiredCount
+        ? `Select ${fusionConfig.requiredCount} characters to fuse.`
+        : selectedFusionCharacters.some((character) => character.rarity !== selectedFusionRarity)
+          ? 'Fusion requires 3 characters of the same rarity.'
+          : !fusionResultRarity
+            ? 'That rarity cannot be fused further.'
+            : null;
+  const canFuseSelection = fusionSelectionError === null;
 
   async function runGameAction(action: string, payload: Record<string, unknown> = {}) {
     const result = await runAction(action, payload);
@@ -383,28 +438,64 @@ export default function HexLandGame() {
       return;
     }
 
-    if (charactersOwned.length >= MAX_CHARACTER_INVENTORY) {
+    if (charactersOwned.length >= maxCharacterInventory) {
       setStatus('Character inventory full.');
       return;
     }
 
     setRolling(true);
     setWonCharacter(null);
-    setRollPreview(Array.from({ length: 12 }, () => createPreviewCharacter(type)));
+    setFusedCharacter(null);
+    setRollPreview(Array.from({ length: 12 }, () => createPreviewCharacter(type, gameConfig)));
     void finishChestAnimation(runAction('openChest', { type }));
   }
 
   function buyExclusiveWithStars() {
     if (rolling) return;
-    if (charactersOwned.length >= MAX_CHARACTER_INVENTORY) {
+    if (charactersOwned.length >= maxCharacterInventory) {
       setStatus('Character inventory full.');
       return;
     }
 
     setRolling(true);
     setWonCharacter(null);
-    setRollPreview(Array.from({ length: 12 }, () => createPreviewCharacter('exclusive')));
+    setFusedCharacter(null);
+    setRollPreview(Array.from({ length: 12 }, () => createPreviewCharacter('exclusive', gameConfig)));
     void finishChestAnimation(runAction('buyExclusive'));
+  }
+
+  function toggleFusionSelection(uid: number) {
+    let hitSelectionCap = false;
+    setSelectedFusionUids((current) => {
+      if (current.includes(uid)) {
+        return current.filter((entry) => entry !== uid);
+      }
+
+      if (current.length >= fusionConfig.requiredCount) {
+        hitSelectionCap = true;
+        return current;
+      }
+
+      return [...current, uid];
+    });
+
+    if (hitSelectionCap) {
+      setStatus(`You can only select ${fusionConfig.requiredCount} characters at once.`);
+    }
+  }
+
+  async function fuseSelectedCharacters() {
+    if (!canFuseSelection) {
+      setStatus(fusionSelectionError || 'Choose a valid fusion set.');
+      return;
+    }
+
+    const result = await runGameAction('fuseCharacters', { uids: selectedFusionUids });
+    if (!result.ok) return;
+
+    setSelectedFusionUids([]);
+    setWonCharacter(null);
+    setFusedCharacter(result.fusedCharacter ?? null);
   }
 
   async function assignCharacterToLand(character: Character, tileId: string) {
@@ -779,14 +870,57 @@ export default function HexLandGame() {
 
             <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
               <h2 className="mb-3 text-lg font-semibold">Boxes & Costs</h2>
-              <div className="space-y-2 text-sm">
-                <button className="w-full rounded bg-yellow-800 py-2" onClick={() => openChest('brown')} disabled={!canAfford(CHEST_COSTS.brown, inventory) || rolling || charactersOwned.length >= MAX_CHARACTER_INVENTORY}>Brown - wheat 240 / wood 96</button>
-                <button className="w-full rounded bg-yellow-500 py-2 text-black" onClick={() => openChest('gold')} disabled={!canAfford(CHEST_COSTS.gold, inventory) || rolling || charactersOwned.length >= MAX_CHARACTER_INVENTORY}>Gold - wheat 480 / wood 240 / brick 144</button>
-                <button className="w-full rounded bg-cyan-400 py-2 text-black" onClick={() => openChest('diamond')} disabled={!canAfford(CHEST_COSTS.diamond, inventory) || rolling || charactersOwned.length >= MAX_CHARACTER_INVENTORY}>Diamond - wheat 960 / wood 480 / brick 280 / ore 160</button>
-                <button className="w-full rounded bg-blue-600 py-2 text-white disabled:opacity-50" onClick={buyExclusiveWithStars} disabled={starTokens < 500 || rolling || charactersOwned.length >= MAX_CHARACTER_INVENTORY}>Buy Exclusive (500 Star Tokens)</button>
+              <div className="space-y-3 text-sm">
+                {(['brown', 'gold', 'diamond'] as ChestType[]).map((type) => {
+                  const cost = chestCosts[type];
+                  const affordable = canAfford(cost, inventory);
+                  const rates = gameConfig.chestDropRates[type].rarities;
+
+                  return (
+                    <div key={type} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+                      <div className="flex items-center justify-between">
+                        <b className="capitalize">{type} Chest</b>
+                        <button
+                          className="rounded bg-slate-700 px-3 py-1.5 disabled:opacity-50"
+                          onClick={() => openChest(type)}
+                          disabled={!affordable || rolling || charactersOwned.length >= maxCharacterInventory}
+                        >
+                          Open
+                        </button>
+                      </div>
+                      <div className="mt-2 text-xs text-slate-300">Cost: {formatResourceCost(cost)}</div>
+                      <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-slate-400">
+                        {RESOURCE_ORDER.filter((resource) => (cost[resource] ?? 0) > 0).map((resource) => {
+                          const amount = cost[resource] ?? 0;
+                          const owned = inventory[resource];
+                          const enough = owned >= amount;
+                          return (
+                            <div key={resource} className={enough ? 'text-emerald-400' : 'text-red-400'}>
+                              {RESOURCE_INFO[resource].label}: {owned.toFixed(0)} / {amount}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-2 text-xs text-slate-400">
+                        Odds: Rare {formatPercent(rates.rare ?? 0)}, Very Rare {formatPercent(rates.very_rare ?? 0)}, Epic {formatPercent(rates.epic ?? 0)}, Mythic {formatPercent(rates.mythic ?? 0)}, Legendary {formatPercent(rates.legendary ?? 0)}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        Bonus: {gameConfig.starTokenBonusAmount} Star Tokens at {formatPercent(gameConfig.chestDropRates[type].starTokenBonusChance)}.
+                      </div>
+                      {!affordable && <div className="mt-1 text-xs text-red-400">You do not have the required materials.</div>}
+                    </div>
+                  );
+                })}
+                <button
+                  className="w-full rounded bg-blue-600 py-2 text-white disabled:opacity-50"
+                  onClick={buyExclusiveWithStars}
+                  disabled={starTokens < gameConfig.exclusiveStarCost || rolling || charactersOwned.length >= maxCharacterInventory}
+                >
+                  Buy Exclusive ({gameConfig.exclusiveStarCost} Star Tokens)
+                </button>
               </div>
               <div className="mt-2 text-xs text-slate-400">Exclusive characters have special abilities: 2x/3x speed, auto-collect, and daily copper.</div>
-              <div className="mt-1 text-xs text-slate-400">You own {charactersOwned.length} / {MAX_CHARACTER_INVENTORY} characters</div>
+              <div className="mt-1 text-xs text-slate-400">You own {charactersOwned.length} / {maxCharacterInventory} characters</div>
             </div>
 
             <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
@@ -891,13 +1025,54 @@ export default function HexLandGame() {
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
             <div className="w-[620px] rounded-2xl bg-slate-900 p-6">
               <h2 className="mb-4 text-xl">Your Characters</h2>
+              <div className="mb-4 rounded-xl border border-slate-800 bg-slate-950 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="font-semibold">Fusion Chamber</div>
+                    <div className="text-xs text-slate-400">
+                      Select {fusionConfig.requiredCount} matching characters to upgrade them into the next rarity tier.
+                    </div>
+                  </div>
+                  <button
+                    className="rounded bg-violet-600 px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                    onClick={() => void fuseSelectedCharacters()}
+                    disabled={!canFuseSelection}
+                  >
+                    Fuse Selected
+                  </button>
+                </div>
+                <div className="mt-3 text-xs text-slate-300">
+                  Selected: {selectedFusionCharacters.length} / {fusionConfig.requiredCount}
+                  {selectedFusionRarity && ` - ${RARITY_META[selectedFusionRarity].label}`}
+                  {fusionResultRarity && ` -> ${RARITY_META[fusionResultRarity].label}`}
+                </div>
+                <div className={`mt-1 text-xs ${canFuseSelection ? 'text-emerald-400' : 'text-slate-500'}`}>{fusionSelectionError ?? 'Ready to fuse.'}</div>
+                {fusedCharacter && (
+                  <div className="mt-3 rounded-lg bg-slate-900 p-3 text-sm">
+                    <div className="text-xs uppercase tracking-wide text-slate-400">Latest fusion result</div>
+                    <div className="mt-1 font-semibold" style={{ color: RARITY_META[fusedCharacter.rarity].color }}>
+                      {fusedCharacter.icon} {fusedCharacter.name} - {RARITY_META[fusedCharacter.rarity].label} ({fusedCharacter.stars}*)
+                    </div>
+                  </div>
+                )}
+              </div>
               {charactersOwned.length === 0 && <div className="mb-4 text-sm text-slate-400">No characters yet. Open boxes and build supply sinks.</div>}
               <div className="mb-4 grid max-h-[320px] grid-cols-2 gap-3 overflow-y-auto pr-2">
                 {charactersOwned.map((character) => (
-                  <div key={character.uid} className="rounded p-3" style={{ background: RARITY_META[character.rarity].color }}>
+                  <div
+                    key={character.uid}
+                    className={`rounded p-3 ${selectedFusionUids.includes(character.uid) ? 'ring-4 ring-white/80' : ''}`}
+                    style={{ background: RARITY_META[character.rarity].color }}
+                  >
                     <div className="font-bold">{character.icon} {character.name}</div>
                     <div className="mb-2 text-xs">{RARITY_META[character.rarity].label} - {character.stars}* - +{character.boost}</div>
                     {character.specialAbility && <div className="mb-2 text-xs font-bold text-white bg-black/30 p-1 rounded">{character.ability}</div>}
+                    <button
+                      className="mb-2 rounded bg-black/40 px-2 py-1 text-xs"
+                      onClick={() => toggleFusionSelection(character.uid)}
+                    >
+                      {selectedFusionUids.includes(character.uid) ? 'Remove from Fusion' : 'Select for Fusion'}
+                    </button>
                     <div className="mb-1 text-xs text-black/80">Choose land:</div>
                     {ownedTiles.map((tile) => (
                       <button key={tile.id} className="mr-1 mb-1 rounded bg-black/40 px-2 py-1 text-xs" onClick={() => void assignCharacterToLand(character, tile.id)}>
@@ -907,8 +1082,15 @@ export default function HexLandGame() {
                   </div>
                 ))}
               </div>
-              <div className="mb-4 text-xs text-slate-400">Character fusion is temporarily disabled while the shared-world server migration is in progress.</div>
-              <button className="w-full rounded bg-red-600 py-2" onClick={() => setShowCharInv(false)}>Close</button>
+              <button
+                className="w-full rounded bg-red-600 py-2"
+                onClick={() => {
+                  setShowCharInv(false);
+                  setSelectedFusionUids([]);
+                }}
+              >
+                Close
+              </button>
             </div>
           </div>
         )}
